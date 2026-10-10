@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>boidscan node</title>
+<style>
+body { font: 16px/1.5 system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; color: #1b1b1b; background: #fff; }
+@media (prefers-color-scheme: dark) { body { color: #e6e6e6; background: #141414; } a { color: #8ab4f8; } }
+input, button { font: inherit; padding: .3rem .5rem; }
+.msg { padding: .5rem 1rem; border-left: 4px solid #3a7; }
+.err { border-color: #c33; }
+code { font-size: .9em; }
+</style>
+</head>
+<body>
+<h1>This host runs a boidscan node</h1>
+<p>boidscan is a free and open source index of publicly reachable services. Nodes connect to public IPv4 addresses, record what services announce during a normal handshake (banners, HTTP responses, TLS certificates), and publish the results openly. No credentials are tried and no vulnerabilities are exploited.</p>
+<ul>
+<li>Project: <a href="{{.ProjectURL}}">{{.ProjectURL}}</a></li>
+<li>Abuse contact for this node: <code>{{.AbuseContact}}</code></li>
+<li>User agent: <code>{{.UserAgent}}</code></li>
+</ul>
+
+<h2>Opt out</h2>
+{{if .Message}}<p class="msg{{if .Error}} err{{end}}">{{.Message}}</p>{{end}}
+<p>Submit a range you are responsible for. It is excluded from future scans and its stored results are deleted. Ranges larger than /{{.MinBits}} need to go through the abuse contact.</p>
+<form method="post" action="/optout">
+<p><label>IPv4 address or CIDR<br><input name="cidr" required placeholder="198.51.100.0/24"></label></p>
+<p><label>Contact (optional, not published)<br><input name="contact" type="email"></label></p>
+<p><button type="submit">Opt out</button></p>
+</form>
+<p>The current opt-out list is public at <a href="/api/v1/optouts">/api/v1/optouts</a>.</p>
+
+<h2>API</h2>
+<ul>
+<li><code>GET /api/v1/host/{ip}</code></li>
+<li><code>GET /api/v1/search?cidr=&amp;port=&amp;q=&amp;cert=&amp;limit=&amp;before=</code></li>
+</ul>
+</body>
+</html>
