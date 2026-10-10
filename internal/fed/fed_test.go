@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -97,6 +98,7 @@ func (c *clock) advance(d time.Duration) {
 type testBoid struct {
 	*Node
 	store   *memStore
+	data    *memData
 	srv     *httptest.Server
 	offline atomic.Bool
 }
@@ -109,6 +111,10 @@ func newBoid(t *testing.T, name string, clk *clock, seeds ...string) *testBoid {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if b.offline.Load() {
 			http.Error(w, "offline", http.StatusServiceUnavailable)
+			return
+		}
+		if b.data != nil && strings.HasPrefix(r.URL.Path, "/api/v1/host/") {
+			b.data.serveHost(w, r)
 			return
 		}
 		b.Handler().ServeHTTP(w, r)

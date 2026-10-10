@@ -32,6 +32,8 @@ type Options struct {
 	GatewayMAC string
 	// IPLayer sends raw IP packets and lets the kernel handle L2.
 	IPLayer bool
+	// Cooldown in seconds; 0 keeps zmap's default of 8.
+	Cooldown int
 }
 
 func Args(o Options) []string {
@@ -57,6 +59,9 @@ func Args(o Options) []string {
 	}
 	if o.IPLayer {
 		args = append(args, "--iplayer")
+	}
+	if o.Cooldown > 0 {
+		args = append(args, "--cooldown-time="+strconv.Itoa(o.Cooldown))
 	}
 	for _, t := range o.Targets {
 		args = append(args, t.String())

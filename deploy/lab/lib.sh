@@ -40,6 +40,34 @@ flock_formed() {
 	done
 }
 
+# homes_of IP prints the boids that hold IP's block, as boid-a sees them.
+homes_of() { curl -fsS "$api/fed/v1/homes?ip=$1" | yq -p json '.homes[].name'; }
+
+# services BOID IP [local] prints how many services BOID reports for IP; with
+# "local" only from its own copy.
+services() {
+	url="$(boid_url "$1")/api/v1/host/$2"
+	[ "${3:-}" = local ] && url="$url?local=1"
+	n=$(curl -fsS "$url" 2>/dev/null | yq -p json '.services | length' 2>/dev/null)
+	echo "${n:-0}"
+}
+
+# units_scanned prints each unit that a home reports as scanned, once.
+units_scanned() {
+	for b in boid-a boid-b boid-c; do
+		curl -fsS "$(boid_url "$b")/fed/v1/units" | yq -p json '.[] | select(.scanned_at) | .block + " " + (.group | tostring)'
+	done | sort -u
+}
+
+# sweep_runs BOID... prints the finished sweep runs of those boids, one unit per line.
+sweep_runs() {
+	for b in "$@"; do
+		curl -fsS "$(boid_url "$b")/fed/v1/runs" | yq -p json '.[] | select(.finished_at and .error == null) | .block + " " + (.group | tostring)'
+	done
+}
+
+lab_down() { $compose --profile scan --profile sweep down -v; }
+
 # Logs are written by root inside the containers, so they are removed from one.
 reset_logs() {
 	mkdir -p logs

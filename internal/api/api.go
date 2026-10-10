@@ -36,6 +36,8 @@ type Backend interface {
 type Flock interface {
 	Self() fed.Record
 	Peers(ctx context.Context) ([]fed.Peer, error)
+	// Host merges this node's results with those of the boids holding ip's block.
+	Host(ctx context.Context, ip netip.Addr) (client.Host, error)
 }
 
 type Server struct {
@@ -49,6 +51,13 @@ func New(b Backend, id policy.Identity) *Server {
 }
 
 func (s *Server) SetFlock(f Flock) { s.flock = f }
+
+func (s *Server) lookup(ctx context.Context, ip netip.Addr, local bool) (client.Host, error) {
+	if s.flock != nil && !local {
+		return s.flock.Host(ctx, ip)
+	}
+	return s.backend.Host(ctx, ip)
+}
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -129,7 +138,7 @@ func (s *Server) runSearch(ctx context.Context, v url.Values) (*searchView, int)
 	}
 	if p, err := netset.ParsePrefix(sv.Query); err == nil {
 		if p.IsSingleIP() && q.Port == 0 && q.Before == 0 {
-			h, err := s.backend.Host(ctx, p.Addr())
+			h, err := s.lookup(ctx, p.Addr(), false)
 			if err != nil {
 				slog.Error("host lookup", "err", err)
 				sv.Error = "The lookup failed."
@@ -174,7 +183,7 @@ func (s *Server) host(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid ip")
 		return
 	}
-	h, err := s.backend.Host(r.Context(), ip.Unmap())
+	h, err := s.lookup(r.Context(), ip.Unmap(), r.URL.Query().Get("local") == "1")
 	if err != nil {
 		slog.Error("host lookup", "err", err)
 		writeError(w, http.StatusInternalServerError, "lookup failed")

@@ -1,6 +1,7 @@
-# Isolated lab: three boids that find each other through a DNS seed, and
-# targets that boid-a's scanner may scan. Nothing outside this network is scanned.
+# Isolated lab: three boids that find each other through a DNS seed, their
+# workers, and targets. Nothing outside this network is scanned.
 #   ./flock.sh            start the flock and watch it
+#   ./flock.sh sweep      start the flock and its workers and watch the sweep
 #   ./e2e.sh              scan the targets and check results and the flock
 #   curl localhost:8080/fed/v1/peers
 
@@ -24,6 +25,16 @@ x-boid-env: &boid-env
   BOIDSCAN_SEEDS: seeds.boidscan.lab
   BOIDSCAN_GOSSIP_INTERVAL: 1s
   BOIDSCAN_LAB: "true"
+  BOIDSCAN_LAB_RANGE: 172.30.0.0/26
+  BOIDSCAN_MIN_RESCAN: 1h
+  BOIDSCAN_LEASE_TTL: 30s
+
+# A worker shares its boid's network namespace, so it scans from the boid's endpoint address.
+x-worker: &worker
+  image: boidscan:lab
+  profiles: [sweep]
+  command: worker -ip-layer -interface eth0 -rate 1000 -cooldown 1 -idle 2s
+  cap_add: [NET_RAW, NET_ADMIN]
 
 networks:
   lab:
@@ -48,7 +59,7 @@ services:
       - ./initdb.sql:/docker-entrypoint-initdb.d/initdb.sql:ro
     healthcheck:
       # TCP, because the init scripts run on a socket-only server first.
-      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "boidscan"]
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "boidscan", "-d", "boid_a"]
       interval: 2s
       retries: 30
     networks:
@@ -57,7 +68,7 @@ services:
 
   boid-a:
     <<: *boid
-    environment:
+    environment: &boid-a-env
       <<: *boid-env
       BOIDSCAN_DB: postgres://boidscan:boidscan@db/boid_a?sslmode=disable
       BOIDSCAN_NODE_NAME: boid-a
@@ -72,7 +83,7 @@ services:
 
   boid-b:
     <<: *boid
-    environment:
+    environment: &boid-b-env
       <<: *boid-env
       BOIDSCAN_DB: postgres://boidscan:boidscan@db/boid_b?sslmode=disable
       BOIDSCAN_NODE_NAME: boid-b
@@ -87,7 +98,7 @@ services:
 
   boid-c:
     <<: *boid
-    environment:
+    environment: &boid-c-env
       <<: *boid-env
       BOIDSCAN_DB: postgres://boidscan:boidscan@db/boid_c?sslmode=disable
       BOIDSCAN_NODE_NAME: boid-c
@@ -100,17 +111,51 @@ services:
         ipv4_address: 172.30.0.6
         aliases: [seeds.boidscan.lab]
 
-  # boid-a's scanner: same database and key, so its results are signed by boid-a.
+  worker-a:
+    <<: *worker
+    network_mode: service:boid-a
+    environment:
+      <<: *boid-a-env
+      BOIDSCAN_DEBUG_LOG: /logs/worker-a.jsonl
+    volumes: ["./logs:/logs", "key-a:/keys"]
+    depends_on:
+      boid-a:
+        condition: service_healthy
+
+  worker-b:
+    <<: *worker
+    network_mode: service:boid-b
+    environment:
+      <<: *boid-b-env
+      BOIDSCAN_DEBUG_LOG: /logs/worker-b.jsonl
+    volumes: ["./logs:/logs", "key-b:/keys"]
+    depends_on:
+      boid-b:
+        condition: service_healthy
+
+  worker-c:
+    <<: *worker
+    network_mode: service:boid-c
+    environment:
+      <<: *boid-c-env
+      BOIDSCAN_DEBUG_LOG: /logs/worker-c.jsonl
+    volumes: ["./logs:/logs", "key-c:/keys"]
+    depends_on:
+      boid-c:
+        condition: service_healthy
+
+  # A manual scan on behalf of boid-a, or of the boid in SCAN_BOID (a, b or c):
+  # same database and key, so its results are signed by that boid.
   scan:
     image: boidscan:lab
     profiles: [scan]
     command: scan -lab -ip-layer -interface eth0 -rate 200 -ports 22,80,443,2200,6379,9443 172.30.0.0/24
     environment:
       <<: *boid-env
-      BOIDSCAN_DB: postgres://boidscan:boidscan@db/boid_a?sslmode=disable
-      BOIDSCAN_NODE_NAME: boid-a-scan
-      BOIDSCAN_DEBUG_LOG: /logs/boid-a-scan.jsonl
-    volumes: ["./logs:/logs", "key-a:/keys"]
+      BOIDSCAN_DB: postgres://boidscan:boidscan@db/boid_${SCAN_BOID:-a}?sslmode=disable
+      BOIDSCAN_NODE_NAME: boid-${SCAN_BOID:-a}-scan
+      BOIDSCAN_DEBUG_LOG: /logs/boid-${SCAN_BOID:-a}-scan.jsonl
+    volumes: ["./logs:/logs", "key-${SCAN_BOID:-a}:/keys"]
     cap_add: [NET_RAW, NET_ADMIN]
     depends_on:
       boid-a:

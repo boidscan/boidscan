@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/boidscan/boidscan/internal/fed"
 	"github.com/boidscan/boidscan/internal/policy"
 	"github.com/boidscan/boidscan/internal/store"
 	"github.com/boidscan/boidscan/pkg/client"
@@ -138,5 +139,35 @@ func TestSearchForm(t *testing.T) {
 	}
 	if code, _ := get("q=x&port=abc"); code != http.StatusBadRequest {
 		t.Fatalf("bad port: status %d, want 400", code)
+	}
+}
+
+type fakeFlock struct{ host client.Host }
+
+func (f fakeFlock) Self() fed.Record                                      { return fed.Record{Name: "boid-a"} }
+func (f fakeFlock) Peers(context.Context) ([]fed.Peer, error)             { return nil, nil }
+func (f fakeFlock) Host(context.Context, netip.Addr) (client.Host, error) { return f.host, nil }
+
+func TestHostLookupsGoThroughTheFlock(t *testing.T) {
+	ip := netip.MustParseAddr("192.0.2.5")
+	local := client.Host{IP: ip.String(), Services: []client.Observation{{Port: 22, Name: "ssh22"}}}
+	merged := client.Host{IP: ip.String(), Services: []client.Observation{{Port: 22, Name: "ssh22"}, {Port: 80, Name: "http80"}}}
+	s := New(&fakeBackend{hosts: map[netip.Addr]client.Host{ip: local}}, testID)
+	s.SetFlock(fakeFlock{host: merged})
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+	c := client.New(srv.URL)
+
+	if h, err := c.Host(context.Background(), ip.String()); err != nil || len(h.Services) != 2 {
+		t.Fatalf("Host = %+v, %v; want the flock's merged result", h, err)
+	}
+	resp, err := http.Get(srv.URL + "/api/v1/host/" + ip.String() + "?local=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if strings.Contains(string(body), "http80") {
+		t.Fatalf("local=1 must answer from this node only: %s", body)
 	}
 }

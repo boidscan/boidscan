@@ -1,11 +1,12 @@
 #!/bin/sh
-# Forms the lab flock, scans the isolated lab network and checks the results through the public API.
+# Forms the lab flock, scans the isolated lab network, sweeps it with a worker
+# per boid and checks the results through the public API.
 set -eu
 . "$(dirname "$0")/lib.sh"
 
 cleanup() {
 	if [ "${KEEP_LAB:-}" != 1 ]; then
-		$compose --profile scan down -v >/dev/null 2>&1 || true
+		lab_down >/dev/null 2>&1 || true
 	fi
 }
 trap cleanup EXIT
@@ -23,7 +24,7 @@ check() {
 	if "$@"; then echo "ok   $desc"; else fail "$desc"; fi
 }
 
-$compose --profile scan down -v >/dev/null 2>&1 || true
+lab_down >/dev/null 2>&1 || true
 reset_logs
 $compose up -d --build --wait db boid-a boid-b boid-c web sshd redis
 
@@ -34,6 +35,25 @@ $compose start boid-c >/dev/null
 check "a restarted boid rejoins" wait_for 30 flock_formed
 scanners=$(curl -fsS "$(boid_url boid-b)/fed/v1/scanners" | tr '\n' ' ')
 check "scanner list names every boid ($scanners)" test "$scanners" = "172.30.0.3 172.30.0.5 172.30.0.6 "
+
+# Two of the three boids hold each block. One home scans, the third boid answers from the homes.
+ip=172.30.0.11
+homes=$(homes_of $ip | tr '\n' ' ')
+scanner=${homes%% *}
+other=$(echo "$homes" | cut -d' ' -f2)
+for b in boid-a boid-b boid-c; do
+	case " $homes" in *" $b "*) ;; *) viewer=$b ;; esac
+done
+echo "     $ip is held by $homes; $scanner scans it, $viewer is not a home"
+SCAN_BOID=${scanner#boid-} $compose run --rm scan scan -lab -ip-layer -interface eth0 -rate 200 -ports 22 $ip/32
+has_copy() { test "$(services "$1" "$2" local)" -gt 0; }
+check "$other got the results from $scanner" wait_for 20 has_copy "$other" $ip
+check "$viewer holds no copy" test "$(services "$viewer" $ip local)" = 0
+check "$viewer answers from the homes" test "$(services "$viewer" $ip)" -gt 0
+$compose stop "$scanner" >/dev/null
+check "$viewer still answers with $scanner stopped" test "$(services "$viewer" $ip)" -gt 0
+$compose start "$scanner" >/dev/null
+check "$scanner rejoins" wait_for 30 flock_formed
 
 $compose run --rm scan
 
@@ -66,13 +86,30 @@ check "operator excludes a host" $compose exec -T boid-a boidscan exclude -note 
 code=$(curl -s -o /dev/null -w '%{http_code}' "$api/api/v1/host/172.30.0.12")
 check "excluded host purged" test "$code" = 404
 
+count11() { curl -fsS "$api/api/v1/search?cidr=172.30.0.11/32" | yq -p json '.results | length'; }
+before=$(count11)
 $compose run --rm scan
 code=$(curl -s -o /dev/null -w '%{http_code}' "$api/api/v1/host/172.30.0.12")
 check "excluded host skipped on rescan" test "$code" = 404
-seen=$(curl -fsS "$api/api/v1/search?cidr=172.30.0.11/32" | yq -p json '.results | length')
-check "other hosts scanned again ($seen observations)" test "$seen" = 4
+after=$(count11)
+check "other hosts scanned again ($before, then $after observations)" test "$((after - before))" = 2
 
 lines=$($compose exec -T boid-a boidscan export ivre 2>/dev/null | wc -l)
 check "ivre export has http records ($lines)" test "$lines" -gt 0
+
+$compose --profile sweep up -d worker-a worker-b worker-c
+# 16 blocks of /30, two port groups each.
+units=32
+swept() { test "$(units_scanned | wc -l)" -eq $units; }
+check "the sweep covers all $units units of 172.30.0.0/26" wait_for 240 swept
+total=$(sweep_runs boid-a boid-b boid-c | wc -l)
+distinct=$(sweep_runs boid-a boid-b boid-c | sort -u | wc -l)
+check "no unit was scanned twice ($total runs, $distinct units)" test "$total" -eq "$distinct" -a "$total" -ge "$units"
+for b in boid-a boid-b boid-c; do
+	n=$(sweep_runs "$b" | wc -l)
+	check "$b's worker took part ($n units)" test "$n" -gt 0
+done
+sleep 5
+check "nothing is scanned again within min-rescan" test "$(sweep_runs boid-a boid-b boid-c | wc -l)" -eq "$total"
 
 echo "e2e passed"

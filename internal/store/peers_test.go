@@ -12,7 +12,7 @@ func TestPeers(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()
 	t0 := time.Now().UTC().Truncate(time.Microsecond)
-	rec := fed.Record{ID: testKey.ID(), Name: "boid-b", Endpoint: "http://192.0.2.5", Time: t0, Signature: []byte("s")}
+	rec := fed.Record{ID: testKey.ID(), Name: "boid-b", Endpoint: "http://192.0.2.5", Catalog: "c1", Time: t0, Signature: []byte("s")}
 
 	if saved, isNew, err := st.SavePeer(ctx, rec); !saved || !isNew || err != nil {
 		t.Fatalf("first save = %v, %v, %v", saved, isNew, err)
@@ -33,7 +33,7 @@ func TestPeers(t *testing.T) {
 	if saved, isNew, _ := st.SavePeer(ctx, rec); !saved || isNew {
 		t.Fatalf("newer record: saved=%v isNew=%v", saved, isNew)
 	}
-	if p := onlyPeer(t, st); !p.Verified || p.State != fed.StateAlive || !p.Time.Equal(rec.Time) {
+	if p := onlyPeer(t, st); !p.Verified || p.State != fed.StateAlive || !p.Time.Equal(rec.Time) || p.Catalog != "c1" {
 		t.Fatalf("newer record with the same endpoint must keep verification: %+v", p)
 	}
 

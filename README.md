@@ -2,7 +2,7 @@
 
 A free and open source index of publicly reachable services, in the spirit of Shodan and Censys, run by its community.
 
-The name comes from [Boids](https://en.wikipedia.org/wiki/Boids), Craig Reynolds' 1986 flocking simulation. Many simple agents following a few local rules end up behaving like one flock. Boidscan nodes ("boids") are meant to work the same way. Federation between nodes is in progress: boids can already find each other (see [Watch boids find each other](#watch-boids-find-each-other)), but they do not share work or results yet.
+The name comes from [Boids](https://en.wikipedia.org/wiki/Boids), Craig Reynolds' 1986 flocking simulation. Many simple agents following a few local rules end up behaving like one flock. Boidscan nodes ("boids") are meant to work the same way. Federation between nodes is in progress. In the lab, boids already find each other, share out a sweep of an address range and keep copies of each other's results (see [Watch boids find each other](#watch-boids-find-each-other) and [Watch the flock sweep](#watch-the-flock-sweep)). There is no public flock yet.
 
 ## What boidscan is, and what it is not
 
@@ -24,6 +24,8 @@ Boidscan never tries credentials, never exploits vulnerabilities and never hides
 - **Rate ceiling.** 10,000 packets per second at most. You can configure less, never more.
 - **Exclusions.** IANA reserved ranges are always excluded. Operators can exclude more ranges on their own node, for example ones their hosting provider forbids them to scan (`boidscan exclude add`). Exclusions are checked before discovery, again before grabbing, and once more when results are stored. They are never shared with other boids.
 - **No opt-out form.** Nobody can check who submits one, so it would let anyone hide any network. Anyone who does not want to be scanned blocks the scanning addresses in their firewall. Each boid lists them at `/fed/v1/scanners`.
+
+How the flock as a whole is kept accountable is described in [GOVERNANCE.md](GOVERNANCE.md).
 
 ## Before you run a node
 
@@ -141,6 +143,29 @@ boid-a-1  | 21:13:45 INFO  boid-c (ajqxcywu) is back
 
 `./deploy/lab/flock.sh logs` follows a running flock. Each boid's view is on http://localhost:8080, :8081 and :8082, and as JSON at `/fed/v1/peers`. Everything each boid logs, including every gossip exchange, is in `deploy/lab/logs/<boid>.jsonl`.
 
+## Watch the flock sweep
+
+Each boid can run a worker next to it. Together the workers sweep an address range without anyone in charge:
+
+1. The range is cut into blocks. Every boid ranks the boids for a block the same way, so they agree on which two boids (three outside the lab) hold it. Those are the block's homes.
+2. A unit of work is one block and one group of ports. A worker picks the unit its own blocks have gone without longest. When its own blocks are done, it asks other boids for theirs.
+3. Before scanning, the worker asks the unit's homes for a lease. It needs a majority of them, and they refuse a unit that another worker holds or that was scanned recently.
+4. After the scan, the boid sends its results and a signed note that the unit was scanned to the homes. Asking any boid about an address returns what the homes hold.
+
+The lab sweeps 172.30.0.0/26 in blocks of four addresses, two port groups each:
+
+```sh
+./deploy/lab/flock.sh sweep
+```
+
+```
+worker-b-1  | 23:24:11 INFO  leased 172.30.0.40/30 group 1 from its own blocks homes="[boid-b (daeg5oun) boid-a (eiefkz4d)]"
+worker-b-1  | 23:24:12 INFO  scanned 172.30.0.40/30 group 1 took=1.078s
+worker-b-1  | 23:24:13 INFO  nothing is due for a scan; checking again every 2s
+```
+
+Each boid lists the units it holds at `/fed/v1/units`, its own sweep scans at `/fed/v1/runs`, and which boids hold an address at `/fed/v1/homes?ip=172.30.0.11`.
+
 ## Build from source
 
 You only need Docker:
@@ -157,6 +182,7 @@ You only need Docker:
 boidscan migrate                     create or upgrade the database schema
 boidscan scan [flags] CIDR...        discover and grab services, store the results
 boidscan serve [flags]               info page with search and JSON API
+boidscan worker [flags]              take part in the flock's sweep
 boidscan export ivre                 HTTP(S) results as zgrab2 JSON for IVRE
 boidscan exclude add|rm|list [CIDR]  manage ranges this node never scans
 ```
@@ -165,9 +191,9 @@ Settings come from flags or `BOIDSCAN_*` environment variables: `DB`, `PROJECT_U
 
 Each node signs its results with an Ed25519 key in `KEY_FILE`, created on first start. Its public half is the node ID. `serve` and `scan` must use the same key file.
 
-Federation: `ENDPOINT` (the node's `http://<IPv4>` address, empty disables federation), `SEEDS`, `GOSSIP_INTERVAL`. Logging: `LOG_LEVEL` (debug, info, warn, error) for the console, and `DEBUG_LOG`, a file that gets every message at debug level as JSON lines.
+Federation: `ENDPOINT` (the node's `http://<IPv4>` address, empty disables federation), `SEEDS`, `GOSSIP_INTERVAL`, `MIN_RESCAN` (how often the flock may scan the same unit, default 7 days), `LEASE_TTL`, `IDLE` (the worker's wait when nothing is due). `serve` and `worker` must use the same key file and endpoint. Logging: `LOG_LEVEL` (debug, info, warn, error) for the console, and `DEBUG_LOG`, a file that gets every message at debug level as JSON lines.
 
-`scan` needs the `NET_RAW` and `NET_ADMIN` capabilities for ZMap.
+`scan` and `worker` need the `NET_RAW` and `NET_ADMIN` capabilities for ZMap.
 
 ## API
 

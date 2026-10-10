@@ -41,6 +41,16 @@ func (s *Set) Overlaps(p netip.Prefix) bool {
 	return false
 }
 
+// Covers reports whether every address of p is in a single prefix of the set.
+func (s *Set) Covers(p netip.Prefix) bool {
+	for _, q := range s.prefixes {
+		if q.Bits() <= p.Bits() && q.Contains(p.Addr()) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Set) Prefixes() []netip.Prefix {
 	return append([]netip.Prefix(nil), s.prefixes...)
 }

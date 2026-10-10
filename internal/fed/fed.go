@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/boidscan/boidscan/internal/catalog"
 	"github.com/boidscan/boidscan/pkg/sig"
 )
 
@@ -70,12 +71,21 @@ type Config struct {
 	// Seeds are http(s) URLs of boids, or DNS names whose A records are boids.
 	Seeds    []string
 	Interval time.Duration
-	// AllowPrivate accepts RFC 1918 endpoints, for the lab.
+	// AllowPrivate accepts RFC 1918 endpoints and results, for the lab.
 	AllowPrivate bool
+
+	Catalog catalog.Catalog
+	// Data enables replication, routed host lookups and leases. Without it
+	// the boid only takes part in discovery.
+	Data Data
+	// MinRescan is how often the flock may scan the same unit.
+	MinRescan time.Duration
+	LeaseTTL  time.Duration
 }
 
 type Node struct {
 	cfg           Config
+	catalogHash   string
 	store         Store
 	client        *http.Client
 	resolver      Resolver
@@ -91,9 +101,13 @@ func New(cfg Config, st Store) (*Node, error) {
 	if cfg.Interval <= 0 {
 		cfg.Interval = 30 * time.Second
 	}
+	if cfg.LeaseTTL <= 0 {
+		cfg.LeaseTTL = 10 * time.Minute
+	}
 	n := &Node{
-		cfg:   cfg,
-		store: st,
+		cfg:         cfg,
+		catalogHash: cfg.Catalog.Hash(),
+		store:       st,
 		// Shorter than the interval, or a dead peer delays the next round.
 		client:   &http.Client{Timeout: min(max(cfg.Interval, time.Second), 5*time.Second)},
 		resolver: net.DefaultResolver,
@@ -119,6 +133,7 @@ func (n *Node) Self() Record {
 		Contact:    n.cfg.Contact,
 		ProjectURL: n.cfg.ProjectURL,
 		Version:    n.cfg.Version,
+		Catalog:    n.catalogHash,
 		Time:       n.now(),
 	}
 	r.sign(n.cfg.Key)
@@ -129,7 +144,10 @@ func (n *Node) Peers(ctx context.Context) ([]Peer, error) { return n.store.Peers
 
 func (n *Node) Run(ctx context.Context) {
 	self := n.Self()
-	slog.Info("I am "+self.Label()+", reachable at "+self.Endpoint, "id", self.ID, "gossip_every", n.cfg.Interval.String())
+	slog.Info("I am "+self.Label()+", reachable at "+self.Endpoint, "id", self.ID, "gossip_every", n.cfg.Interval.String(), "catalog", n.cfg.Catalog.Name+" "+sig.Short(n.catalogHash))
+	if n.cfg.Data != nil {
+		go n.replicateLoop(ctx)
+	}
 	t := time.NewTicker(n.cfg.Interval)
 	defer t.Stop()
 	for {
@@ -282,6 +300,10 @@ func (n *Node) exchange(ctx context.Context, endpoint string, peers []Peer) {
 }
 
 func (n *Node) call(ctx context.Context, method, url string, body []byte, out any) error {
+	return call(ctx, n.client, method, url, body, out)
+}
+
+func call(ctx context.Context, c *http.Client, method, url string, body []byte, out any) error {
 	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -289,7 +311,7 @@ func (n *Node) call(ctx context.Context, method, url string, body []byte, out an
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	res, err := n.client.Do(req)
+	res, err := c.Do(req)
 	if err != nil {
 		return err
 	}
@@ -297,7 +319,7 @@ func (n *Node) call(ctx context.Context, method, url string, body []byte, out an
 	if res.StatusCode != http.StatusOK {
 		return fmt.Errorf("%s: %s", url, res.Status)
 	}
-	return json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(out)
+	return json.NewDecoder(io.LimitReader(res.Body, maxPushBody)).Decode(out)
 }
 
 func (n *Node) ingest(ctx context.Context, records []Record, via string) {
@@ -455,6 +477,14 @@ func (n *Node) Handler() http.Handler {
 	mux.HandleFunc("POST /fed/v1/gossip", n.handleGossip)
 	mux.HandleFunc("GET /fed/v1/peers", n.handlePeers)
 	mux.HandleFunc("GET /fed/v1/scanners", n.handleScanners)
+	if n.cfg.Data != nil {
+		mux.HandleFunc("POST /fed/v1/push", n.handlePush)
+		mux.HandleFunc("POST /fed/v1/lease", n.handleLease)
+		mux.HandleFunc("GET /fed/v1/due", n.handleDue)
+		mux.HandleFunc("GET /fed/v1/units", n.handleUnits)
+		mux.HandleFunc("GET /fed/v1/runs", n.handleRuns)
+		mux.HandleFunc("GET /fed/v1/homes", n.handleHomes)
+	}
 	return mux
 }
 

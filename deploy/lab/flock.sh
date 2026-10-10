@@ -12,6 +12,8 @@ usage: ./flock.sh [command]
   up      start the flock in the background
   demo    start the flock, then stop and restart boid-c so you can watch the
           others notice it leave and return
+  sweep   start the flock and a worker per boid, and watch them share the
+          lab range: lease a unit, scan it, push the results to its homes
   logs    follow the console output of a running flock
   down    stop the lab and delete its data
 
@@ -32,7 +34,15 @@ start() {
 	$compose --progress quiet up -d boid-a boid-b boid-c
 }
 
-follow() { $compose logs -f --no-color boid-a boid-b boid-c; }
+follow() { $compose logs -f --no-color boid-a boid-b boid-c "$@"; }
+
+sweep() {
+	start
+	wait_for 60 flock_formed || { say "The flock did not form within 60s."; exit 1; }
+	say "The flock formed. Starting a worker per boid; each sweeps 172.30.0.0/26 in /30 blocks, two port groups each."
+	$compose --profile sweep up -d worker-a worker-b worker-c
+	follow worker-a worker-b worker-c
+}
 
 demo() {
 	start
@@ -56,8 +66,9 @@ case "${1:-watch}" in
 watch) start && follow ;;
 up) start ;;
 demo) demo ;;
+sweep) sweep ;;
 logs) follow ;;
-down) $compose --profile scan down -v ;;
+down) lab_down ;;
 -h | --help | help) usage ;;
 *) usage >&2; exit 2 ;;
 esac

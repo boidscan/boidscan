@@ -1,4 +1,5 @@
-// Package store persists scan runs, observations, exclusions and peers in PostgreSQL.
+// Package store persists scan runs, observations, exclusions, peers, coverage
+// and leases in PostgreSQL.
 package store
 
 import (
@@ -16,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/boidscan/boidscan/internal/catalog"
 	"github.com/boidscan/boidscan/internal/fed"
 	"github.com/boidscan/boidscan/internal/grab"
 	"github.com/boidscan/boidscan/internal/netset"
@@ -91,7 +93,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 	return tx.Commit(ctx)
 }
 
-func (s *Store) StartRun(ctx context.Context, nodeID string, targets []netip.Prefix, ports []uint16) (int64, error) {
+// StartRun records a scan. unit is nil for manual scans.
+func (s *Store) StartRun(ctx context.Context, nodeID string, targets []netip.Prefix, ports []uint16, unit *catalog.Unit) (int64, error) {
 	ts := make([]string, len(targets))
 	for i, t := range targets {
 		ts[i] = t.String()
@@ -100,10 +103,15 @@ func (s *Store) StartRun(ctx context.Context, nodeID string, targets []netip.Pre
 	for i, p := range ports {
 		ps[i] = int32(p)
 	}
+	var block *netip.Prefix
+	var group *int
+	if unit != nil {
+		block, group = &unit.Block, &unit.Group
+	}
 	var id int64
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO scan_runs (node_id, targets, ports) VALUES ($1, $2, $3) RETURNING id`,
-		nodeID, ts, ps).Scan(&id)
+		`INSERT INTO scan_runs (node_id, targets, ports, block, port_group) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+		nodeID, ts, ps, block, group).Scan(&id)
 	return id, err
 }
 
@@ -136,7 +144,7 @@ func (s *Store) AddObservation(ctx context.Context, runID int64, k fed.Signer, o
 	return err
 }
 
-const obsColumns = `id, run_id, node_id, host(ip), port, name, protocol, status, seen_at, coalesce(cert_sha256, ''), coalesce(cert_names, '{}'), raw, signature`
+const obsColumns = `id, coalesce(run_id, 0), node_id, host(ip), port, name, protocol, status, seen_at, coalesce(cert_sha256, ''), coalesce(cert_names, '{}'), raw, signature`
 
 func scanObservation(row pgx.Row) (client.Observation, error) {
 	var o client.Observation

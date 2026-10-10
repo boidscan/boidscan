@@ -1,5 +1,6 @@
-// Package fed lets boids find each other: signed node records, seeds,
-// endpoint challenges, gossip and liveness.
+// Package fed lets boids find each other (signed node records, seeds,
+// endpoint challenges, gossip and liveness) and share work and results
+// (block placement, replication, leases and the sweep).
 package fed
 
 import (
@@ -17,14 +18,16 @@ import (
 // Record is what a boid says about itself. It is signed by its own key, so it
 // can be passed on by others without being altered.
 type Record struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	Endpoint   string    `json:"endpoint"`
-	Contact    string    `json:"contact"`
-	ProjectURL string    `json:"project_url"`
-	Version    string    `json:"version"`
-	Time       time.Time `json:"time"`
-	Signature  []byte    `json:"signature"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Endpoint   string `json:"endpoint"`
+	Contact    string `json:"contact"`
+	ProjectURL string `json:"project_url"`
+	Version    string `json:"version"`
+	// Catalog is the hash of the work catalog; boids share work only with equal catalogs.
+	Catalog   string    `json:"catalog"`
+	Time      time.Time `json:"time"`
+	Signature []byte    `json:"signature"`
 }
 
 type Signer interface {
@@ -33,7 +36,7 @@ type Signer interface {
 }
 
 func (r Record) message() []byte {
-	return sig.Message("boidscan-node-v1", r.ID, r.Name, r.Endpoint, r.Contact, r.ProjectURL, r.Version, sig.Time(r.Time))
+	return sig.Message("boidscan-node-v1", r.ID, r.Name, r.Endpoint, r.Contact, r.ProjectURL, r.Version, r.Catalog, sig.Time(r.Time))
 }
 
 func (r *Record) sign(k Signer) {
@@ -49,7 +52,7 @@ func (r Record) Label() string {
 }
 
 func (r Record) verify() error {
-	for field, v := range map[string]string{"name": r.Name, "endpoint": r.Endpoint, "contact": r.Contact, "project_url": r.ProjectURL, "version": r.Version} {
+	for field, v := range map[string]string{"name": r.Name, "endpoint": r.Endpoint, "contact": r.Contact, "project_url": r.ProjectURL, "version": r.Version, "catalog": r.Catalog} {
 		if len(v) > 256 {
 			return fmt.Errorf("%s is too long", field)
 		}

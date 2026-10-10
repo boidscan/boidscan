@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/boidscan/boidscan/internal/api"
-	"github.com/boidscan/boidscan/internal/discover"
+	"github.com/boidscan/boidscan/internal/catalog"
 	"github.com/boidscan/boidscan/internal/export"
 	"github.com/boidscan/boidscan/internal/fed"
 	"github.com/boidscan/boidscan/internal/grab"
@@ -24,6 +24,7 @@ import (
 	"github.com/boidscan/boidscan/internal/logx"
 	"github.com/boidscan/boidscan/internal/netset"
 	"github.com/boidscan/boidscan/internal/policy"
+	"github.com/boidscan/boidscan/internal/scan"
 	"github.com/boidscan/boidscan/internal/store"
 )
 
@@ -33,6 +34,7 @@ commands:
   migrate                      create or upgrade the database schema
   scan [flags] CIDR...         discover and grab services, store the results
   serve [flags]                serve the info page with search and the JSON API
+  worker [flags]               take part in the flock's sweep: lease, scan, repeat
   export ivre                  write HTTP results as zgrab2 JSON for "ivre scan2db"
   exclude add|rm|list [CIDR]   manage ranges this node never scans
 
@@ -64,6 +66,7 @@ func main() {
 		"migrate": cmdMigrate,
 		"scan":    cmdScan,
 		"serve":   cmdServe,
+		"worker":  cmdWorker,
 		"export":  cmdExport,
 		"exclude": cmdExclude,
 	}
@@ -173,19 +176,53 @@ func parsePorts(s string) ([]uint16, error) {
 	return out, nil
 }
 
+// scanFlags are shared by scan and worker.
+type scanFlags struct {
+	rate        int
+	excludeFile string
+	tools       scan.Tools
+}
+
+func (f *scanFlags) register(fs *flag.FlagSet) {
+	fs.IntVar(&f.rate, "rate", 0, fmt.Sprintf("packets per second, at most %d (default %d)", policy.MaxRate, policy.MaxRate))
+	fs.StringVar(&f.excludeFile, "exclude-file", env("EXCLUDE_FILE", ""), "extra ranges not to scan, one CIDR per line")
+	fs.StringVar(&f.tools.ZMap, "zmap", env("ZMAP", "zmap"), "zmap binary")
+	fs.StringVar(&f.tools.ZGrab2, "zgrab2", env("ZGRAB2", "zgrab2"), "zgrab2 binary")
+	fs.StringVar(&f.tools.Interface, "interface", env("INTERFACE", ""), "network interface for zmap")
+	fs.StringVar(&f.tools.GatewayMAC, "gateway-mac", env("GATEWAY_MAC", ""), "gateway MAC for zmap")
+	fs.BoolVar(&f.tools.IPLayer, "ip-layer", env("IP_LAYER", "") == "true", "send IP packets without Ethernet framing (zmap --iplayer), e.g. on VPNs or container bridges")
+	fs.IntVar(&f.tools.Cooldown, "cooldown", 0, "seconds zmap waits for late replies (default: zmap's 8)")
+}
+
+// policy loads the exclusions afresh, so ranges added while a worker runs apply to its next unit.
+func (f *scanFlags) policy(ctx context.Context, st *store.Store, id policy.Identity, lab bool) (*policy.Policy, error) {
+	exclusions, err := st.ExclusionSet(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("loading exclusions: %w", err)
+	}
+	if f.excludeFile != "" {
+		file, err := os.Open(f.excludeFile)
+		if err != nil {
+			return nil, err
+		}
+		extra, err := netset.Read(file)
+		file.Close()
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", f.excludeFile, err)
+		}
+		exclusions.AddSet(extra)
+	}
+	return policy.New(id, f.rate, lab, exclusions)
+}
+
 func cmdScan(ctx context.Context, args []string) error {
 	var c common
+	var sf scanFlags
 	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
 	c.register(fs, true)
-	rate := fs.Int("rate", 0, fmt.Sprintf("packets per second, at most %d (default %d)", policy.MaxRate, policy.MaxRate))
+	sf.register(fs)
 	ports := fs.String("ports", "", "ports or ranges to scan, e.g. 22,80,8000-8100 (default: Shodan's port list)")
-	excludeFile := fs.String("exclude-file", env("EXCLUDE_FILE", ""), "extra ranges not to scan, one CIDR per line")
 	lab := fs.Bool("lab", false, "allow RFC 1918 targets, and only those, for testing on your own network")
-	zmapBin := fs.String("zmap", env("ZMAP", "zmap"), "zmap binary")
-	zgrabBin := fs.String("zgrab2", env("ZGRAB2", "zgrab2"), "zgrab2 binary")
-	iface := fs.String("interface", env("INTERFACE", ""), "network interface for zmap")
-	gwMAC := fs.String("gateway-mac", env("GATEWAY_MAC", ""), "gateway MAC for zmap")
-	ipLayer := fs.Bool("ip-layer", env("IP_LAYER", "") == "true", "send IP packets without Ethernet framing (zmap --iplayer), e.g. on VPNs or container bridges")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -198,6 +235,10 @@ func cmdScan(ctx context.Context, args []string) error {
 		}
 		targets = append(targets, p)
 	}
+	portList, err := parsePorts(*ports)
+	if err != nil {
+		return err
+	}
 
 	key, err := identity.Load(c.keyFile)
 	if err != nil {
@@ -209,116 +250,115 @@ func cmdScan(ctx context.Context, args []string) error {
 	}
 	defer st.Close()
 
-	exclusions, err := st.ExclusionSet(ctx)
+	pol, err := sf.policy(ctx, st, c.id, *lab)
 	if err != nil {
-		return fmt.Errorf("loading exclusions: %w", err)
+		return err
 	}
-	if *excludeFile != "" {
-		f, err := os.Open(*excludeFile)
-		if err != nil {
+	_, err = scan.Run(ctx, st, key, pol, sf.tools, scan.Job{Targets: targets, Ports: portList})
+	return err
+}
+
+// flockFlags are shared by serve and worker; boids only cooperate when they match.
+type flockFlags struct {
+	name      string
+	endpoint  string
+	lab       bool
+	labRange  string
+	minRescan time.Duration
+}
+
+func (f *flockFlags) register(fs *flag.FlagSet) {
+	hostname, _ := os.Hostname()
+	fs.StringVar(&f.name, "name", env("NODE_NAME", hostname), "name shown to other boids, up to 32 characters")
+	fs.StringVar(&f.endpoint, "endpoint", env("ENDPOINT", ""), "http://<public IPv4> where other boids reach this node; empty disables federation")
+	fs.BoolVar(&f.lab, "lab", env("LAB", "") == "true", "lab flock: RFC 1918 endpoints and targets, and the lab catalog")
+	fs.StringVar(&f.labRange, "lab-range", env("LAB_RANGE", ""), "the range a lab flock sweeps, e.g. 172.30.0.0/26")
+	fs.DurationVar(&f.minRescan, "min-rescan", envDuration("MIN_RESCAN", 7*24*time.Hour), "the flock scans each block and port group at most this often")
+}
+
+func (f *flockFlags) catalog() (catalog.Catalog, error) {
+	if !f.lab {
+		return catalog.Default(), nil
+	}
+	p, err := netip.ParsePrefix(f.labRange)
+	if err != nil {
+		return catalog.Catalog{}, fmt.Errorf("lab mode needs -lab-range: %w", err)
+	}
+	return catalog.Lab(p)
+}
+
+func cmdWorker(ctx context.Context, args []string) error {
+	var c common
+	var sf scanFlags
+	var ff flockFlags
+	fs := flag.NewFlagSet("worker", flag.ContinueOnError)
+	c.register(fs, true)
+	sf.register(fs)
+	ff.register(fs)
+	idle := fs.Duration("idle", envDuration("IDLE", time.Minute), "wait between rounds that found nothing to scan")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if ff.endpoint == "" {
+		return errors.New("worker needs the endpoint of this node's serve process (BOIDSCAN_ENDPOINT)")
+	}
+	if err := c.id.Validate(); err != nil {
+		return err
+	}
+	cat, err := ff.catalog()
+	if err != nil {
+		return err
+	}
+	key, err := identity.Load(c.keyFile)
+	if err != nil {
+		return fmt.Errorf("node key: %w", err)
+	}
+	st, err := c.open(ctx)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	sw := fed.NewSweeper(fed.SweepConfig{
+		Key:          key,
+		Name:         ff.name,
+		Endpoint:     ff.endpoint,
+		Catalog:      cat,
+		AllowPrivate: ff.lab,
+		MinRescan:    ff.minRescan,
+		Idle:         *idle,
+		Scan: func(ctx context.Context, u catalog.Unit) error {
+			pol, err := sf.policy(ctx, st, c.id, ff.lab)
+			if err != nil {
+				return err
+			}
+			_, err = scan.Run(ctx, st, key, pol, sf.tools, scan.Job{Targets: []netip.Prefix{u.Block}, Ports: cat.Ports(u.Group), Unit: &u})
 			return err
-		}
-		extra, err := netset.Read(f)
-		f.Close()
-		if err != nil {
-			return fmt.Errorf("%s: %w", *excludeFile, err)
-		}
-		exclusions.AddSet(extra)
-	}
-
-	pol, err := policy.New(c.id, *rate, *lab, exclusions)
-	if err != nil {
-		return err
-	}
-	if err := pol.CheckTargets(targets); err != nil {
-		return err
-	}
-	portList, err := parsePorts(*ports)
-	if err != nil {
-		return err
-	}
-	plan := grab.NewPlan(pol.UserAgent(), portList)
-	blocklist, err := pol.WriteBlocklist()
-	if err != nil {
-		return err
-	}
-	defer os.Remove(blocklist)
-
-	runID, err := st.StartRun(ctx, key.ID(), targets, plan.Ports())
-	if err != nil {
-		return err
-	}
-	slog.Info("scan started", "run", runID, "targets", targets, "ports", len(plan.Ports()), "rate", pol.Rate)
-
-	scanCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	hits := make(chan discover.Hit, 1024)
-	obs := make(chan grab.Observation, 1024)
-	discErr := make(chan error, 1)
-	grabErr := make(chan error, 1)
-	go func() {
-		discErr <- discover.Run(scanCtx, discover.Options{
-			Binary:     *zmapBin,
-			Targets:    targets,
-			Ports:      plan.Ports(),
-			Blocklist:  blocklist,
-			Rate:       pol.Rate,
-			Interface:  *iface,
-			GatewayMAC: *gwMAC,
-			IPLayer:    *ipLayer,
-		}, pol, hits)
-	}()
-	go func() {
-		grabErr <- grab.Run(scanCtx, *zgrabBin, plan, pol, blocklist, hits, obs)
-	}()
-
-	var stored, success int
-	var storeErr error
-	for o := range obs {
-		if storeErr != nil {
-			continue
-		}
-		if err := st.AddObservation(ctx, runID, key, o); err != nil {
-			storeErr = err
-			cancel()
-			continue
-		}
-		stored++
-		if o.Status == "success" {
-			success++
-		}
-	}
-	// If zgrab2 stopped early, zmap is still writing hits; stop it and unblock it.
-	cancel()
-	go func() {
-		for range hits {
-		}
-	}()
-	runErr := errors.Join(<-discErr, <-grabErr, storeErr)
-	finishCtx, finishCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer finishCancel()
-	if err := st.FinishRun(finishCtx, runID, runErr); err != nil {
-		slog.Error("recording run result", "err", err)
-	}
-	slog.Info("scan finished", "run", runID, "observations", stored, "successful", success)
-	return runErr
+		},
+	}, st)
+	slog.Info("sweeping with catalog "+cat.Name, "id", key.ID(), "min_rescan", ff.minRescan.String())
+	sw.Run(ctx)
+	return nil
 }
 
 func cmdServe(ctx context.Context, args []string) error {
 	var c common
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	c.register(fs, true)
+	var ff flockFlags
+	ff.register(fs)
 	listen := fs.String("listen", env("LISTEN", ":80"), "listen address; scanned hosts expect the info page on port 80")
-	hostname, _ := os.Hostname()
-	name := fs.String("name", env("NODE_NAME", hostname), "name shown to other boids, up to 32 characters")
-	endpoint := fs.String("endpoint", env("ENDPOINT", ""), "http://<public IPv4> where other boids reach this node; empty disables federation")
 	seeds := fs.String("seeds", env("SEEDS", ""), "comma-separated boid URLs or DNS names whose A records are boids")
 	interval := fs.Duration("gossip-interval", envDuration("GOSSIP_INTERVAL", 30*time.Second), "time between gossip rounds")
-	lab := fs.Bool("lab", env("LAB", "") == "true", "accept RFC 1918 endpoints, for testing on your own network")
+	leaseTTL := fs.Duration("lease-ttl", envDuration("LEASE_TTL", 10*time.Minute), "how long a lease this node grants lasts without renewal")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if err := c.id.Validate(); err != nil {
+		return err
+	}
+	cat, err := ff.catalog()
+	if err != nil {
 		return err
 	}
 	key, err := identity.Load(c.keyFile)
@@ -334,17 +374,21 @@ func cmdServe(ctx context.Context, args []string) error {
 	site := api.New(st, c.id)
 	mux := http.NewServeMux()
 	mux.Handle("/", site.Handler())
-	if *endpoint != "" {
+	if ff.endpoint != "" {
 		node, err := fed.New(fed.Config{
 			Key:          key,
-			Name:         *name,
-			Endpoint:     *endpoint,
+			Name:         ff.name,
+			Endpoint:     ff.endpoint,
 			Contact:      c.id.AbuseContact,
 			ProjectURL:   c.id.ProjectURL,
 			Version:      policy.Version,
 			Seeds:        splitList(*seeds),
 			Interval:     *interval,
-			AllowPrivate: *lab,
+			AllowPrivate: ff.lab,
+			Catalog:      cat,
+			Data:         st,
+			MinRescan:    ff.minRescan,
+			LeaseTTL:     *leaseTTL,
 		}, st)
 		if err != nil {
 			return err

@@ -28,7 +28,7 @@ func openTestStore(t *testing.T) *Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(st.Close)
-	_, err = st.pool.Exec(ctx, `DROP TABLE IF EXISTS observations, scan_runs, optouts, exclusions, peers, schema_migrations CASCADE`)
+	_, err = st.pool.Exec(ctx, `DROP TABLE IF EXISTS observations, scan_runs, optouts, exclusions, peers, coverage, leases, replicas, schema_migrations CASCADE`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestMigrateIdempotent(t *testing.T) {
 func TestObservationsRoundTrip(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()
-	run, err := st.StartRun(ctx, testKey.ID(), []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}, []uint16{22, 443})
+	run, err := st.StartRun(ctx, testKey.ID(), []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}, []uint16{22, 443}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestObservationsRoundTrip(t *testing.T) {
 func TestExclusion(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()
-	run, _ := st.StartRun(ctx, testKey.ID(), []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}, []uint16{80})
+	run, _ := st.StartRun(ctx, testKey.ID(), []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}, []uint16{80}, nil)
 	st.AddObservation(ctx, run, testKey, obs("198.51.100.7", 80, "http80", "http", `{}`))
 	st.AddObservation(ctx, run, testKey, obs("198.51.100.200", 80, "http80", "http", `{}`))
 
