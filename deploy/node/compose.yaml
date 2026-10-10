@@ -1,0 +1,58 @@
+# A single boidscan node: Postgres, the web page with search on http://localhost:8080 and the scanner.
+# Put BOIDSCAN_ABUSE_CONTACT=you@example.org in a .env file next to this one, then:
+#   docker compose up -d
+#   docker compose run --rm scan 203.0.113.5
+
+x-boidscan: &boidscan
+  image: ghcr.io/boidscan/boidscan:0.0.1
+  environment: &boidscan-env
+    BOIDSCAN_DB: postgres://boidscan:boidscan@db/boidscan?sslmode=disable
+    BOIDSCAN_ABUSE_CONTACT: ${BOIDSCAN_ABUSE_CONTACT:?put BOIDSCAN_ABUSE_CONTACT=you@example.org in a .env file next to compose.yaml}
+    BOIDSCAN_NODE_ID: ${BOIDSCAN_NODE_ID:-my-node}
+
+volumes:
+  db:
+
+services:
+  db:
+    image: postgres:17.6-bookworm
+    environment:
+      POSTGRES_USER: boidscan
+      POSTGRES_PASSWORD: boidscan
+      POSTGRES_DB: boidscan
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: ["db:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "boidscan"]
+      interval: 2s
+      retries: 30
+
+  migrate:
+    <<: *boidscan
+    command: migrate
+    depends_on:
+      db:
+        condition: service_healthy
+
+  serve:
+    <<: *boidscan
+    command: serve
+    ports: ["8080:80"]
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # zmap needs the host's own interface; it reaches Postgres through the published port.
+  scan:
+    <<: *boidscan
+    profiles: [scan]
+    network_mode: host
+    entrypoint: ["boidscan", "scan"]
+    cap_add: [NET_RAW, NET_ADMIN]
+    environment:
+      <<: *boidscan-env
+      BOIDSCAN_DB: postgres://boidscan:boidscan@127.0.0.1:5432/boidscan?sslmode=disable
+    depends_on:
+      migrate:
+        condition: service_completed_successfully

@@ -149,3 +149,45 @@ func TestOptOutForm(t *testing.T) {
 		t.Errorf("second opt-out within a minute: status %d, want 429", got)
 	}
 }
+
+func TestSearchForm(t *testing.T) {
+	ip := netip.MustParseAddr("192.0.2.5")
+	fb := &fakeBackend{
+		hosts: map[netip.Addr]client.Host{ip: {IP: ip.String(), Services: []client.Observation{{ID: 1, IP: ip.String(), Port: 22, Name: "ssh22", Data: []byte(`{"banner":"SSH-2.0-OpenSSH"}`)}}}},
+		pages: []client.Page{
+			{Results: []client.Observation{{ID: 9, IP: "192.0.2.9", Port: 80, Name: "http80", Data: []byte(`{}`)}}, Next: 9},
+			{Results: []client.Observation{}},
+		},
+	}
+	srv := httptest.NewServer(New(fb, testID).Handler())
+	defer srv.Close()
+
+	get := func(query string) (int, string) {
+		resp, err := http.Get(srv.URL + "/?" + query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(body)
+	}
+
+	code, body := get("q=192.0.2.5")
+	if code != http.StatusOK || !strings.Contains(body, "ssh22") || !strings.Contains(body, "SSH-2.0-OpenSSH") {
+		t.Fatalf("host search: %d %s", code, body)
+	}
+	code, body = get("q=nginx&port=80")
+	if code != http.StatusOK || !strings.Contains(body, "192.0.2.9") || !strings.Contains(body, "before=9") {
+		t.Fatalf("text search: %d %s", code, body)
+	}
+	if q := fb.queries[0]; q.Text != "nginx" || q.Port != 80 || q.CIDR != "" {
+		t.Fatalf("text search query = %+v", q)
+	}
+	code, body = get("q=192.0.2.0/24")
+	if code != http.StatusOK || !strings.Contains(body, "No results") || fb.queries[1].CIDR != "192.0.2.0/24" {
+		t.Fatalf("cidr search: %d %+v", code, fb.queries)
+	}
+	if code, _ := get("q=x&port=abc"); code != http.StatusBadRequest {
+		t.Fatalf("bad port: status %d, want 400", code)
+	}
+}

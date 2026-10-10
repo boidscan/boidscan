@@ -4,6 +4,12 @@ A free and open source index of publicly reachable services, in the spirit of Sh
 
 The name comes from [Boids](https://en.wikipedia.org/wiki/Boids), Craig Reynolds' 1986 flocking simulation. Many simple agents following a few local rules end up behaving like one flock. Boidscan nodes ("boids") are meant to work the same way. This release is a single node. Federation between nodes is the next milestone.
 
+## What boidscan is, and what it is not
+
+Boidscan is not a public website like Shodan where you can search the whole internet. You run your own node on your own computer or server. The node scans the addresses you give it and stores what it finds. You then search those results in your browser at http://localhost:8080 or through the JSON API.
+
+Your node only knows about addresses it has scanned itself. There is no shared index of the whole internet yet. That comes with federation.
+
 ## What a node does
 
 1. [ZMap](https://github.com/zmap/zmap) finds open TCP ports on the ranges you give it.
@@ -25,25 +31,75 @@ Many hosting providers forbid outbound scanning in their terms of service and ac
 
 Start by scanning only ranges you own. Scan the wider internet only once your info page and abuse contact are reachable.
 
-## Install
+## Scan a single address
 
-Each release on GitHub has binaries for Linux and macOS and a container image with ZMap and ZGrab2 included:
+You need [Docker](https://docs.docker.com/get-started/get-docker/) and an address you are allowed to scan, such as a server you rent. Scan it from a different machine, for example your laptop.
 
-```sh
-docker pull ghcr.io/boidscan/boidscan
+1. Create an empty folder and download the compose file into it:
+
+   ```sh
+   mkdir boidscan && cd boidscan
+   curl -O https://raw.githubusercontent.com/boidscan/boidscan/main/deploy/node/compose.yaml
+   ```
+
+2. Create a file called `.env` in the same folder with an email address where people can reach you. Every node has to name a contact, because the services you scan see it and may want to ask what is going on:
+
+   ```sh
+   echo "BOIDSCAN_ABUSE_CONTACT=you@example.org" > .env
+   ```
+
+3. Start the database and the web page:
+
+   ```sh
+   docker compose up -d
+   ```
+
+4. Scan the address. Replace `203.0.113.5` with yours. It takes a few seconds:
+
+   ```sh
+   docker compose run --rm scan 203.0.113.5
+   ```
+
+   The last line reports how many services answered, for example `scan finished run=1 observations=3 successful=3`.
+
+5. Open http://localhost:8080, type the address into the search box and press Search. Each open port is listed, and "Raw result" shows everything the service announced.
+
+To scan a range instead of one address, use CIDR notation: `203.0.113.0/24` covers the 256 addresses from `203.0.113.0` to `203.0.113.255`. Stop everything with `docker compose down`. The results are kept until you run `docker compose down -v`.
+
+The search box takes an IP address, a CIDR range or any text, such as `nginx` or a hostname from a certificate. An optional port narrows the results.
+
+If the scan finishes with `observations=0` although the address has open ports, see [Troubleshooting](#troubleshooting).
+
+## What a result looks like
+
+The same data is available as JSON from `GET /api/v1/host/{ip}`. This is an HTTP server on port 80, trimmed:
+
+```json
+{
+  "ip": "203.0.113.5",
+  "services": [
+    {
+      "port": 80,
+      "name": "http80",
+      "protocol": "http",
+      "status": "success",
+      "seen_at": "2026-10-10T18:42:41Z",
+      "data": {
+        "result": {
+          "response": {
+            "status_line": "200 OK",
+            "headers": { "server": ["nginx/1.29.1"] }
+          }
+        }
+      }
+    }
+  ]
+}
 ```
 
-To build from source you only need Docker:
+## Try it without scanning anything real
 
-```sh
-./build.sh        # run the tests, then build dist/boidscan
-./build.sh image  # build the container image
-./build.sh e2e    # scan the isolated lab and check the results
-```
-
-## Quick start (isolated lab)
-
-The lab runs Postgres, three target containers and a node on a private Docker network. Nothing outside that network is scanned.
+The lab needs a copy of this repository (`git clone https://github.com/boidscan/boidscan`). It runs Postgres, three target containers and a node on a private Docker network. Nothing outside that network is scanned.
 
 ```sh
 docker compose -f deploy/lab/compose.yaml up -d --build
@@ -52,14 +108,24 @@ curl localhost:8080/api/v1/host/172.30.0.11
 curl 'localhost:8080/api/v1/search?cert=www.lab.test'
 ```
 
-Open http://localhost:8080 to see the info page and opt-out form.
+Open http://localhost:8080 and search for `172.30.0.11` or `nginx`.
+
+## Build from source
+
+You only need Docker:
+
+```sh
+./build.sh        # run the tests, then build dist/boidscan
+./build.sh image  # build the container image
+./build.sh e2e    # scan the isolated lab and check the results
+```
 
 ## Commands
 
 ```
 boidscan migrate                     create or upgrade the database schema
 boidscan scan [flags] CIDR...        discover and grab services, store the results
-boidscan serve [flags]               info page, opt-out form and search API
+boidscan serve [flags]               info page with search, opt-out form and JSON API
 boidscan export ivre                 HTTP(S) results as zgrab2 JSON for IVRE
 boidscan optout add|rm|list [CIDR]   manage opt-outs without the form's size limit
 ```
@@ -89,7 +155,7 @@ err = c.SearchAll(ctx, client.Query{Port: 443, Cert: "example.org"}, func(o clie
 
 ## Viewing results in IVRE
 
-[IVRE](https://github.com/ivre/ivre) provides a web UI on top of this data:
+[IVRE](https://github.com/ivre/ivre) provides a richer web UI on top of this data:
 
 ```sh
 boidscan export ivre > boidscan.json
@@ -98,6 +164,16 @@ ivre db2view nmap
 ```
 
 IVRE's zgrab2 importer only reads HTTP(S) results. The other protocols are available through the Boidscan API. HTTPS certificates import correctly with IVRE's current master branch. The 0.9.20 release on PyPI fails on them because it uses a pyOpenSSL call that newer pyOpenSSL versions removed.
+
+## Troubleshooting
+
+**`required variable BOIDSCAN_ABUSE_CONTACT is missing a value`.** The `.env` file is missing or not in the same folder as `compose.yaml`.
+
+**The scan finishes with `observations=0`.** Either nothing answered on the ports boidscan checks (21, 22, 23, 25, 80, 110, 143, 443, 1883, 3306, 5432, 6379, 8080, 8443 and 27017), or ZMap sent its packets out of the wrong network interface. The scan container uses the host's network. Pass the interface explicitly, for example `docker compose run --rm scan -interface eth0 203.0.113.5`. On VPNs, add `-ip-layer`.
+
+**Nothing on http://localhost:8080.** Check `docker compose ps` and `docker compose logs serve`. Port 8080 may already be in use. Change the left side of `8080:80` in `compose.yaml`.
+
+**Scanning other people's networks.** Scanned hosts look for the info page on port 80 of the scanning address. Before you scan beyond your own addresses, run `serve` on a public host on port 80.
 
 ## License
 

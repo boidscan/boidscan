@@ -2,6 +2,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
@@ -11,7 +12,9 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,7 +30,7 @@ const MinOptOutBits = 16
 //go:embed templates/index.html
 var templates embed.FS
 
-var indexTmpl = template.Must(template.ParseFS(templates, "templates/index.html"))
+var indexTmpl = template.Must(template.New("index.html").Funcs(template.FuncMap{"pretty": prettyJSON}).ParseFS(templates, "templates/index.html"))
 
 type Backend interface {
 	Host(ctx context.Context, ip netip.Addr) (client.Host, error)
@@ -63,25 +66,102 @@ type indexData struct {
 	MinBits   int
 	Message   string
 	Error     bool
+	Search    *searchView
+}
+
+type searchView struct {
+	Query   string
+	Port    string
+	Results []client.Observation
+	NextURL string
+	Error   string
 }
 
 func (s *Server) renderIndex(w http.ResponseWriter, status int, msg string, isErr bool) {
+	s.render(w, status, indexData{Message: msg, Error: isErr})
+}
+
+func (s *Server) render(w http.ResponseWriter, status int, d indexData) {
+	d.Identity = s.identity
+	d.UserAgent = s.identity.UserAgent()
+	d.MinBits = MinOptOutBits
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	err := indexTmpl.Execute(w, indexData{
-		Identity:  s.identity,
-		UserAgent: s.identity.UserAgent(),
-		MinBits:   MinOptOutBits,
-		Message:   msg,
-		Error:     isErr,
-	})
-	if err != nil {
+	if err := indexTmpl.Execute(w, d); err != nil {
 		slog.Error("rendering index", "err", err)
 	}
 }
 
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
-	s.renderIndex(w, http.StatusOK, "", false)
+	v := r.URL.Query()
+	if !v.Has("q") && !v.Has("port") {
+		s.render(w, http.StatusOK, indexData{})
+		return
+	}
+	sv, status := s.runSearch(r.Context(), v)
+	s.render(w, status, indexData{Search: sv})
+}
+
+// runSearch backs the search form: an address shows the latest result per
+// service, a CIDR lists that range, anything else is a text search.
+func (s *Server) runSearch(ctx context.Context, v url.Values) (*searchView, int) {
+	sv := &searchView{Query: strings.TrimSpace(v.Get("q")), Port: strings.TrimSpace(v.Get("port"))}
+	var q client.Query
+	if sv.Port != "" {
+		n, err := strconv.Atoi(sv.Port)
+		if err != nil {
+			sv.Error = "The port must be a number."
+			return sv, http.StatusBadRequest
+		}
+		q.Port = n
+	}
+	if b := v.Get("before"); b != "" {
+		n, err := strconv.ParseInt(b, 10, 64)
+		if err != nil {
+			sv.Error = "Invalid page."
+			return sv, http.StatusBadRequest
+		}
+		q.Before = n
+	}
+	if p, err := netset.ParsePrefix(sv.Query); err == nil {
+		if p.IsSingleIP() && q.Port == 0 && q.Before == 0 {
+			h, err := s.backend.Host(ctx, p.Addr())
+			if err != nil {
+				slog.Error("host lookup", "err", err)
+				sv.Error = "The lookup failed."
+				return sv, http.StatusInternalServerError
+			}
+			sv.Results = h.Services
+			return sv, http.StatusOK
+		}
+		q.CIDR = p.String()
+	} else {
+		q.Text = sv.Query
+	}
+	page, err := s.backend.Search(ctx, q)
+	if errors.Is(err, store.ErrBadQuery) {
+		sv.Error = err.Error()
+		return sv, http.StatusBadRequest
+	}
+	if err != nil {
+		slog.Error("search", "err", err)
+		sv.Error = "The search failed."
+		return sv, http.StatusInternalServerError
+	}
+	sv.Results = page.Results
+	if page.Next != 0 {
+		next := url.Values{"q": {sv.Query}, "port": {sv.Port}, "before": {strconv.FormatInt(page.Next, 10)}}
+		sv.NextURL = "/?" + next.Encode()
+	}
+	return sv, http.StatusOK
+}
+
+func prettyJSON(raw json.RawMessage) string {
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, raw, "", "  "); err != nil {
+		return string(raw)
+	}
+	return buf.String()
 }
 
 func (s *Server) optout(w http.ResponseWriter, r *http.Request) {

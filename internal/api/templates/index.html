@@ -11,6 +11,11 @@ input, button { font: inherit; padding: .3rem .5rem; }
 .msg { padding: .5rem 1rem; border-left: 4px solid #3a7; }
 .err { border-color: #c33; }
 code { font-size: .9em; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: .3rem .5rem .3rem 0; vertical-align: top; }
+tr + tr td { border-top: 1px solid #8884; }
+pre { overflow-x: auto; max-height: 30rem; font-size: .8em; }
+.hint { font-size: .9em; opacity: .8; }
 </style>
 </head>
 <body>
@@ -21,6 +26,34 @@ code { font-size: .9em; }
 <li>Abuse contact for this node: <code>{{.AbuseContact}}</code></li>
 <li>User agent: <code>{{.UserAgent}}</code></li>
 </ul>
+
+<h2>Search</h2>
+<form method="get" action="/">
+<p><label>IP address, CIDR range or text<br><input name="q" value="{{with .Search}}{{.Query}}{{end}}" placeholder="203.0.113.5"></label>
+<label>Port (optional)<br><input name="port" value="{{with .Search}}{{.Port}}{{end}}" size="6" placeholder="443"></label>
+<button type="submit">Search</button></p>
+<p class="hint">Text matches anything a service announced, for example <code>nginx</code> or a hostname. Only results this node has scanned are shown.</p>
+</form>
+{{with .Search}}
+{{if .Error}}<p class="msg err">{{.Error}}</p>
+{{else if not .Results}}<p class="msg">No results. This node has not scanned that address, or nothing answered.</p>
+{{else}}
+<table>
+<tr><th>Address</th><th>Port</th><th>Service</th><th>Status</th><th>Seen</th></tr>
+{{range .Results}}
+<tr>
+<td><a href="/?q={{.IP}}">{{.IP}}</a></td>
+<td>{{.Port}}</td>
+<td>{{.Name}}{{with .CertNames}}<br><small>{{range $i, $n := .}}{{if $i}}, {{end}}{{$n}}{{end}}</small>{{end}}</td>
+<td>{{.Status}}</td>
+<td>{{.SeenAt.Format "2006-01-02 15:04"}}</td>
+</tr>
+<tr><td colspan="5"><details><summary>Raw result</summary><pre>{{pretty .Data}}</pre></details></td></tr>
+{{end}}
+</table>
+{{with .NextURL}}<p><a href="{{.}}">More results</a></p>{{end}}
+{{end}}
+{{end}}
 
 <h2>Opt out</h2>
 {{if .Message}}<p class="msg{{if .Error}} err{{end}}">{{.Message}}</p>{{end}}

@@ -30,7 +30,7 @@ const usage = `usage: boidscan <command> [flags]
 commands:
   migrate                      create or upgrade the database schema
   scan [flags] CIDR...         discover and grab services, store the results
-  serve [flags]                serve the info page, opt-out form and search API
+  serve [flags]                serve the info page with search, opt-out form and JSON API
   export ivre                  write HTTP results as zgrab2 JSON for "ivre scan2db"
   optout add|rm|list [CIDR]    manage the opt-out list without the form's size limit
 
