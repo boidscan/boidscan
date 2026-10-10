@@ -18,7 +18,10 @@ import (
 	"github.com/boidscan/boidscan/internal/api"
 	"github.com/boidscan/boidscan/internal/discover"
 	"github.com/boidscan/boidscan/internal/export"
+	"github.com/boidscan/boidscan/internal/fed"
 	"github.com/boidscan/boidscan/internal/grab"
+	"github.com/boidscan/boidscan/internal/identity"
+	"github.com/boidscan/boidscan/internal/logx"
 	"github.com/boidscan/boidscan/internal/netset"
 	"github.com/boidscan/boidscan/internal/policy"
 	"github.com/boidscan/boidscan/internal/store"
@@ -29,9 +32,9 @@ const usage = `usage: boidscan <command> [flags]
 commands:
   migrate                      create or upgrade the database schema
   scan [flags] CIDR...         discover and grab services, store the results
-  serve [flags]                serve the info page with search, opt-out form and JSON API
+  serve [flags]                serve the info page with search and the JSON API
   export ivre                  write HTTP results as zgrab2 JSON for "ivre scan2db"
-  optout add|rm|list [CIDR]    manage the opt-out list without the form's size limit
+  exclude add|rm|list [CIDR]   manage ranges this node never scans
 
 Run "boidscan <command> -h" for flags. Flags default to BOIDSCAN_* environment variables.
 `
@@ -44,12 +47,25 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	level, err := logx.ParseLevel(env("LOG_LEVEL", "info"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "BOIDSCAN_LOG_LEVEL:", err)
+		os.Exit(2)
+	}
+	hostname, _ := os.Hostname()
+	closeLog, err := logx.Setup(os.Stderr, level, env("DEBUG_LOG", ""), env("NODE_NAME", hostname))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "BOIDSCAN_DEBUG_LOG:", err)
+		os.Exit(2)
+	}
+	defer closeLog()
+
 	cmds := map[string]func(context.Context, []string) error{
 		"migrate": cmdMigrate,
 		"scan":    cmdScan,
 		"serve":   cmdServe,
 		"export":  cmdExport,
-		"optout":  cmdOptOut,
+		"exclude": cmdExclude,
 	}
 	run, ok := cmds[os.Args[1]]
 	if !ok {
@@ -61,6 +77,7 @@ func main() {
 			os.Exit(2)
 		}
 		slog.Error(os.Args[1]+" failed", "err", err)
+		closeLog()
 		os.Exit(1)
 	}
 }
@@ -72,9 +89,28 @@ func env(name, def string) string {
 	return def
 }
 
+func envDuration(name string, def time.Duration) time.Duration {
+	d, err := time.ParseDuration(env(name, ""))
+	if err != nil {
+		return def
+	}
+	return d
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, f := range strings.Split(s, ",") {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 type common struct {
-	dsn string
-	id  policy.Identity
+	dsn     string
+	id      policy.Identity
+	keyFile string
 }
 
 func (c *common) register(fs *flag.FlagSet, needIdentity bool) {
@@ -82,6 +118,7 @@ func (c *common) register(fs *flag.FlagSet, needIdentity bool) {
 	if needIdentity {
 		fs.StringVar(&c.id.ProjectURL, "project-url", env("PROJECT_URL", "https://boidscan.network"), "URL explaining the project, shown to scanned hosts")
 		fs.StringVar(&c.id.AbuseContact, "abuse-contact", env("ABUSE_CONTACT", ""), "abuse contact for this node")
+		fs.StringVar(&c.keyFile, "key-file", env("KEY_FILE", "boidscan.key"), "node key; created on first start. Its public half is the node ID")
 	}
 }
 
@@ -140,11 +177,9 @@ func cmdScan(ctx context.Context, args []string) error {
 	var c common
 	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
 	c.register(fs, true)
-	hostname, _ := os.Hostname()
-	nodeID := fs.String("node-id", env("NODE_ID", hostname), "identifier recorded with every observation")
 	rate := fs.Int("rate", 0, fmt.Sprintf("packets per second, at most %d (default %d)", policy.MaxRate, policy.MaxRate))
 	ports := fs.String("ports", "", "ports or ranges to scan, e.g. 22,80,8000-8100 (default: Shodan's port list)")
-	optoutFile := fs.String("optout-file", env("OPTOUT_FILE", ""), "extra opt-out list, one CIDR per line")
+	excludeFile := fs.String("exclude-file", env("EXCLUDE_FILE", ""), "extra ranges not to scan, one CIDR per line")
 	lab := fs.Bool("lab", false, "allow RFC 1918 targets, and only those, for testing on your own network")
 	zmapBin := fs.String("zmap", env("ZMAP", "zmap"), "zmap binary")
 	zgrabBin := fs.String("zgrab2", env("ZGRAB2", "zgrab2"), "zgrab2 binary")
@@ -164,30 +199,34 @@ func cmdScan(ctx context.Context, args []string) error {
 		targets = append(targets, p)
 	}
 
+	key, err := identity.Load(c.keyFile)
+	if err != nil {
+		return fmt.Errorf("node key: %w", err)
+	}
 	st, err := c.open(ctx)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
 
-	optouts, err := st.OptOutSet(ctx)
+	exclusions, err := st.ExclusionSet(ctx)
 	if err != nil {
-		return fmt.Errorf("loading opt-outs: %w", err)
+		return fmt.Errorf("loading exclusions: %w", err)
 	}
-	if *optoutFile != "" {
-		f, err := os.Open(*optoutFile)
+	if *excludeFile != "" {
+		f, err := os.Open(*excludeFile)
 		if err != nil {
 			return err
 		}
 		extra, err := netset.Read(f)
 		f.Close()
 		if err != nil {
-			return fmt.Errorf("%s: %w", *optoutFile, err)
+			return fmt.Errorf("%s: %w", *excludeFile, err)
 		}
-		optouts.AddSet(extra)
+		exclusions.AddSet(extra)
 	}
 
-	pol, err := policy.New(c.id, *rate, *lab, optouts)
+	pol, err := policy.New(c.id, *rate, *lab, exclusions)
 	if err != nil {
 		return err
 	}
@@ -205,7 +244,7 @@ func cmdScan(ctx context.Context, args []string) error {
 	}
 	defer os.Remove(blocklist)
 
-	runID, err := st.StartRun(ctx, *nodeID, targets, plan.Ports())
+	runID, err := st.StartRun(ctx, key.ID(), targets, plan.Ports())
 	if err != nil {
 		return err
 	}
@@ -239,7 +278,7 @@ func cmdScan(ctx context.Context, args []string) error {
 		if storeErr != nil {
 			continue
 		}
-		if err := st.AddObservation(ctx, runID, *nodeID, o); err != nil {
+		if err := st.AddObservation(ctx, runID, key, o); err != nil {
 			storeErr = err
 			cancel()
 			continue
@@ -270,11 +309,21 @@ func cmdServe(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	c.register(fs, true)
 	listen := fs.String("listen", env("LISTEN", ":80"), "listen address; scanned hosts expect the info page on port 80")
+	hostname, _ := os.Hostname()
+	name := fs.String("name", env("NODE_NAME", hostname), "name shown to other boids, up to 32 characters")
+	endpoint := fs.String("endpoint", env("ENDPOINT", ""), "http://<public IPv4> where other boids reach this node; empty disables federation")
+	seeds := fs.String("seeds", env("SEEDS", ""), "comma-separated boid URLs or DNS names whose A records are boids")
+	interval := fs.Duration("gossip-interval", envDuration("GOSSIP_INTERVAL", 30*time.Second), "time between gossip rounds")
+	lab := fs.Bool("lab", env("LAB", "") == "true", "accept RFC 1918 endpoints, for testing on your own network")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if err := c.id.Validate(); err != nil {
 		return err
+	}
+	key, err := identity.Load(c.keyFile)
+	if err != nil {
+		return fmt.Errorf("node key: %w", err)
 	}
 	st, err := c.open(ctx)
 	if err != nil {
@@ -282,9 +331,34 @@ func cmdServe(ctx context.Context, args []string) error {
 	}
 	defer st.Close()
 
+	site := api.New(st, c.id)
+	mux := http.NewServeMux()
+	mux.Handle("/", site.Handler())
+	if *endpoint != "" {
+		node, err := fed.New(fed.Config{
+			Key:          key,
+			Name:         *name,
+			Endpoint:     *endpoint,
+			Contact:      c.id.AbuseContact,
+			ProjectURL:   c.id.ProjectURL,
+			Version:      policy.Version,
+			Seeds:        splitList(*seeds),
+			Interval:     *interval,
+			AllowPrivate: *lab,
+		}, st)
+		if err != nil {
+			return err
+		}
+		site.SetFlock(node)
+		mux.Handle("/fed/", node.Handler())
+		go node.Run(ctx)
+	} else {
+		slog.Info("federation disabled: no endpoint configured", "id", key.ID())
+	}
+
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           api.New(st, c.id).Handler(),
+		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
@@ -322,11 +396,11 @@ func cmdExport(ctx context.Context, args []string) error {
 	return err
 }
 
-func cmdOptOut(ctx context.Context, args []string) error {
+func cmdExclude(ctx context.Context, args []string) error {
 	var c common
-	fs := flag.NewFlagSet("optout", flag.ContinueOnError)
+	fs := flag.NewFlagSet("exclude", flag.ContinueOnError)
 	c.register(fs, false)
-	contact := fs.String("contact", "", "who requested the opt-out")
+	note := fs.String("note", "", "why the range is excluded, for the operator's own records")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -338,12 +412,12 @@ func cmdOptOut(ctx context.Context, args []string) error {
 
 	switch fs.Arg(0) {
 	case "list":
-		list, err := st.OptOuts(ctx)
+		list, err := st.Exclusions(ctx)
 		if err != nil {
 			return err
 		}
-		for _, o := range list {
-			fmt.Printf("%s\t%s\n", o.CIDR, o.AddedAt.Format(time.RFC3339))
+		for _, e := range list {
+			fmt.Printf("%s\t%s\t%s\n", e.Prefix, e.AddedAt.Format(time.RFC3339), e.Note)
 		}
 		return nil
 	case "add", "rm":
@@ -352,19 +426,19 @@ func cmdOptOut(ctx context.Context, args []string) error {
 			return fmt.Errorf("cidr: %w", err)
 		}
 		if fs.Arg(0) == "rm" {
-			ok, err := st.RemoveOptOut(ctx, p)
+			ok, err := st.RemoveExclusion(ctx, p)
 			if err == nil && !ok {
-				err = fmt.Errorf("%s is not on the opt-out list", p)
+				err = fmt.Errorf("%s is not excluded", p)
 			}
 			return err
 		}
-		if err := st.AddOptOut(ctx, p, *contact); err != nil {
+		if err := st.AddExclusion(ctx, p, *note); err != nil {
 			return err
 		}
-		n, err := st.PurgeOptedOut(ctx, p)
-		slog.Info("opt-out added", "prefix", p, "purged", n)
+		n, err := st.PurgeRange(ctx, p)
+		slog.Info("exclusion added; stored results in the range deleted", "prefix", p, "purged", n)
 		return err
 	default:
-		return errors.New("usage: boidscan optout add|rm|list [CIDR]")
+		return errors.New("usage: boidscan exclude add|rm|list [CIDR]")
 	}
 }

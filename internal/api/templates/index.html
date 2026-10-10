@@ -55,20 +55,33 @@ pre { overflow-x: auto; max-height: 30rem; font-size: .8em; }
 {{end}}
 {{end}}
 
-<h2>Opt out</h2>
-{{if .Message}}<p class="msg{{if .Error}} err{{end}}">{{.Message}}</p>{{end}}
-<p>Submit a range you are responsible for. It is excluded from future scans and its stored results are deleted. Ranges larger than /{{.MinBits}} need to go through the abuse contact.</p>
-<form method="post" action="/optout">
-<p><label>IPv4 address or CIDR<br><input name="cidr" required placeholder="198.51.100.0/24"></label></p>
-<p><label>Contact (optional, not published)<br><input name="contact" type="email"></label></p>
-<p><button type="submit">Opt out</button></p>
-</form>
-<p>The current opt-out list is public at <a href="/api/v1/optouts">/api/v1/optouts</a>.</p>
+<h2>Do not want to be scanned?</h2>
+<p>Block the scanning addresses in your firewall. This node scans from the address this page is served on.{{if .Flock}} The addresses of every boid this node knows are at <a href="/fed/v1/scanners">/fed/v1/scanners</a>, one per line. Boids join and leave, so fetch the list regularly.{{end}} Results that were already collected are not deleted. Questions go to <code>{{.AbuseContact}}</code>.</p>
+
+{{with .Flock}}
+<h2>Flock</h2>
+<p>This node is <code>{{.Self.Name}}</code>, ID <code>{{.Self.ID}}</code>, reachable at <code>{{.Self.Endpoint}}</code>.</p>
+{{if .Peers}}
+<table>
+<tr><th>Boid</th><th>Endpoint</th><th>State</th><th>Last heard</th></tr>
+{{range .Peers}}
+<tr>
+<td>{{.Name}}<br><small><code>{{.ID}}</code></small></td>
+<td>{{.Endpoint}}</td>
+<td>{{if .Verified}}{{.State}}{{else}}unverified{{end}}</td>
+<td>{{.Time.Format "2006-01-02 15:04:05"}}</td>
+</tr>
+{{end}}
+</table>
+{{else}}<p>No other boids known yet.</p>{{end}}
+{{end}}
 
 <h2>API</h2>
 <ul>
 <li><code>GET /api/v1/host/{ip}</code></li>
 <li><code>GET /api/v1/search?cidr=&amp;port=&amp;q=&amp;cert=&amp;limit=&amp;before=</code></li>
+<li><code>GET /fed/v1/peers</code></li>
+<li><code>GET /fed/v1/scanners</code></li>
 </ul>
 </body>
 </html>

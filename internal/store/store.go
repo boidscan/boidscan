@@ -1,4 +1,4 @@
-// Package store persists scan runs, observations and opt-outs in PostgreSQL.
+// Package store persists scan runs, observations, exclusions and peers in PostgreSQL.
 package store
 
 import (
@@ -16,9 +16,11 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/boidscan/boidscan/internal/fed"
 	"github.com/boidscan/boidscan/internal/grab"
 	"github.com/boidscan/boidscan/internal/netset"
 	"github.com/boidscan/boidscan/pkg/client"
+	"github.com/boidscan/boidscan/pkg/sig"
 )
 
 //go:embed migrations/*.sql
@@ -115,27 +117,31 @@ func (s *Store) FinishRun(ctx context.Context, id int64, runErr error) error {
 	return err
 }
 
-func (s *Store) AddObservation(ctx context.Context, runID int64, nodeID string, o grab.Observation) error {
+// AddObservation stores o signed by k, the node that scanned it.
+func (s *Store) AddObservation(ctx context.Context, runID int64, k fed.Signer, o grab.Observation) error {
 	sha, names := CertInfo(o.Raw)
 	var shaArg *string
 	if sha != "" {
 		shaArg = &sha
 	}
-	// The guard catches opt-outs submitted while a scan is already running.
+	ip := o.IP.Unmap().String()
+	seen := time.Now().UTC().Truncate(time.Microsecond)
+	signature := k.Sign(sig.ObservationMessage(ip, int(o.Port), o.Name, o.Protocol, o.Status, seen, o.Raw))
+	// The guard catches exclusions added while a scan is already running.
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO observations (run_id, node_id, ip, port, name, protocol, status, cert_sha256, cert_names, raw)
-		 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
-		 WHERE NOT EXISTS (SELECT 1 FROM optouts WHERE $3::inet <<= cidr)`,
-		runID, nodeID, o.IP, int32(o.Port), o.Name, o.Protocol, o.Status, shaArg, names, []byte(o.Raw))
+		`INSERT INTO observations (run_id, node_id, ip, port, name, protocol, status, seen_at, cert_sha256, cert_names, raw, signature)
+		 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+		 WHERE NOT EXISTS (SELECT 1 FROM exclusions WHERE $3::inet <<= cidr)`,
+		runID, k.ID(), ip, int32(o.Port), o.Name, o.Protocol, o.Status, seen, shaArg, names, []byte(o.Raw), signature)
 	return err
 }
 
-const obsColumns = `id, run_id, node_id, host(ip), port, name, protocol, status, seen_at, coalesce(cert_sha256, ''), coalesce(cert_names, '{}'), raw`
+const obsColumns = `id, run_id, node_id, host(ip), port, name, protocol, status, seen_at, coalesce(cert_sha256, ''), coalesce(cert_names, '{}'), raw, signature`
 
 func scanObservation(row pgx.Row) (client.Observation, error) {
 	var o client.Observation
 	var raw []byte
-	err := row.Scan(&o.ID, &o.RunID, &o.NodeID, &o.IP, &o.Port, &o.Name, &o.Protocol, &o.Status, &o.SeenAt, &o.CertSHA256, &o.CertNames, &raw)
+	err := row.Scan(&o.ID, &o.RunID, &o.NodeID, &o.IP, &o.Port, &o.Name, &o.Protocol, &o.Status, &o.SeenAt, &o.CertSHA256, &o.CertNames, &raw, &o.Signature)
 	o.Data = raw
 	return o, err
 }
@@ -259,54 +265,55 @@ func (s *Store) Each(ctx context.Context, protocol string, fn func(client.Observ
 	return rows.Err()
 }
 
-func (s *Store) AddOptOut(ctx context.Context, p netip.Prefix, contact string) error {
+// Exclusion is a range this node's operator chose not to scan.
+type Exclusion struct {
+	Prefix  netip.Prefix
+	Note    string
+	AddedAt time.Time
+}
+
+func (s *Store) AddExclusion(ctx context.Context, p netip.Prefix, note string) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO optouts (cidr, contact) VALUES ($1, $2) ON CONFLICT (cidr) DO NOTHING`, p, contact)
+		`INSERT INTO exclusions (cidr, note) VALUES ($1, $2) ON CONFLICT (cidr) DO NOTHING`, p, note)
 	return err
 }
 
-func (s *Store) RemoveOptOut(ctx context.Context, p netip.Prefix) (bool, error) {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM optouts WHERE cidr = $1`, p)
+func (s *Store) RemoveExclusion(ctx context.Context, p netip.Prefix) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM exclusions WHERE cidr = $1`, p)
 	return tag.RowsAffected() > 0, err
 }
 
-func (s *Store) OptOuts(ctx context.Context) ([]client.OptOut, error) {
-	rows, err := s.pool.Query(ctx, `SELECT cidr::text, added_at FROM optouts ORDER BY cidr`)
+func (s *Store) Exclusions(ctx context.Context) ([]Exclusion, error) {
+	rows, err := s.pool.Query(ctx, `SELECT cidr, note, added_at FROM exclusions ORDER BY cidr`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := []client.OptOut{}
+	var out []Exclusion
 	for rows.Next() {
-		var o client.OptOut
-		var added time.Time
-		if err := rows.Scan(&o.CIDR, &added); err != nil {
+		var e Exclusion
+		if err := rows.Scan(&e.Prefix, &e.Note, &e.AddedAt); err != nil {
 			return nil, err
 		}
-		o.AddedAt = added
-		out = append(out, o)
+		out = append(out, e)
 	}
 	return out, rows.Err()
 }
 
-func (s *Store) OptOutSet(ctx context.Context) (*netset.Set, error) {
-	list, err := s.OptOuts(ctx)
+func (s *Store) ExclusionSet(ctx context.Context) (*netset.Set, error) {
+	list, err := s.Exclusions(ctx)
 	if err != nil {
 		return nil, err
 	}
 	set := &netset.Set{}
-	for _, o := range list {
-		p, err := netip.ParsePrefix(o.CIDR)
-		if err != nil {
-			return nil, err
-		}
-		set.Add(p)
+	for _, e := range list {
+		set.Add(e.Prefix)
 	}
 	return set, nil
 }
 
-// PurgeOptedOut deletes stored observations inside an opted-out range.
-func (s *Store) PurgeOptedOut(ctx context.Context, p netip.Prefix) (int64, error) {
+// PurgeRange deletes stored observations inside p.
+func (s *Store) PurgeRange(ctx context.Context, p netip.Prefix) (int64, error) {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM observations WHERE ip <<= $1`, p)
 	return tag.RowsAffected(), err
 }

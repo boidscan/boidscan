@@ -28,7 +28,7 @@ func TestAPIErrorFromPlainText(t *testing.T) {
 		http.Error(w, "upstream down", http.StatusBadGateway)
 	}))
 	defer srv.Close()
-	_, err := New(srv.URL).OptOuts(context.Background())
+	_, err := New(srv.URL).Host(context.Background(), "192.0.2.1")
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadGateway || apiErr.Message != "upstream down" {
 		t.Fatalf("got %v", err)

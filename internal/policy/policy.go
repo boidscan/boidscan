@@ -43,7 +43,7 @@ type Policy struct {
 	exclude      *netset.Set
 }
 
-func New(id Identity, rate int, allowPrivate bool, optouts ...*netset.Set) (*Policy, error) {
+func New(id Identity, rate int, allowPrivate bool, exclusions ...*netset.Set) (*Policy, error) {
 	if err := id.Validate(); err != nil {
 		return nil, err
 	}
@@ -54,7 +54,7 @@ func New(id Identity, rate int, allowPrivate bool, optouts ...*netset.Set) (*Pol
 		return nil, fmt.Errorf("rate %d exceeds the ceiling of %d packets/s", rate, MaxRate)
 	}
 	ex := netset.Reserved(allowPrivate)
-	for _, o := range optouts {
+	for _, o := range exclusions {
 		if o != nil {
 			ex.AddSet(o)
 		}

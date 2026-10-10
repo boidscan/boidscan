@@ -1,0 +1,2 @@
+CREATE DATABASE boid_b;
+CREATE DATABASE boid_c;

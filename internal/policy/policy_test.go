@@ -43,7 +43,7 @@ func TestIdentityRequired(t *testing.T) {
 	}
 }
 
-func TestOptOutAndReserved(t *testing.T) {
+func TestExclusionsAndReserved(t *testing.T) {
 	opt, _ := netset.Read(strings.NewReader("198.51.100.0/24\n"))
 	p, err := New(id, 0, false, opt)
 	if err != nil {
@@ -72,7 +72,7 @@ func TestLabMode(t *testing.T) {
 		t.Error("lab mode must allow RFC1918")
 	}
 	if p.Allowed(netip.MustParseAddr("10.9.0.5")) {
-		t.Error("opt-out must still apply in lab mode")
+		t.Error("exclusions must still apply in lab mode")
 	}
 	if p.Allowed(netip.MustParseAddr("127.0.0.1")) {
 		t.Error("loopback must stay excluded in lab mode")

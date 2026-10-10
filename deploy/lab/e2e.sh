@@ -1,10 +1,7 @@
 #!/bin/sh
-# Scans the isolated lab network and checks results through the public API. Needs docker, curl and yq.
+# Forms the lab flock, scans the isolated lab network and checks the results through the public API.
 set -eu
-
-cd "$(dirname "$0")"
-compose="docker compose -f compose.yaml"
-api=http://localhost:${LAB_PORT:-8080}
+. "$(dirname "$0")/lib.sh"
 
 cleanup() {
 	if [ "${KEEP_LAB:-}" != 1 ]; then
@@ -16,6 +13,7 @@ trap cleanup EXIT
 fail() {
 	echo "FAIL: $*" >&2
 	$compose logs --tail=50 >&2 || true
+	echo "debug logs: $PWD/logs" >&2
 	exit 1
 }
 
@@ -26,8 +24,18 @@ check() {
 }
 
 $compose --profile scan down -v >/dev/null 2>&1 || true
-$compose up -d --build --wait db serve web sshd redis
-$compose run --rm --build scan
+reset_logs
+$compose up -d --build --wait db boid-a boid-b boid-c web sshd redis
+
+check "flock formed through the DNS seed" wait_for 60 flock_formed
+$compose stop boid-c >/dev/null
+check "boid-a marks a stopped boid down" wait_for 60 sees boid-a boid-c down
+$compose start boid-c >/dev/null
+check "a restarted boid rejoins" wait_for 30 flock_formed
+scanners=$(curl -fsS "$(boid_url boid-b)/fed/v1/scanners" | tr '\n' ' ')
+check "scanner list names every boid ($scanners)" test "$scanners" = "172.30.0.3 172.30.0.5 172.30.0.6 "
+
+$compose run --rm scan
 
 host() { curl -fsS "$api/api/v1/host/$1"; }
 
@@ -44,24 +52,27 @@ check "unknown port grabbed with banner module" test "$generic" = true
 names=$(curl -fsS "$api/api/v1/search?cert=www.lab.test&port=9443" | yq -p json '.results[0].name + " " + (.results[0].cert_names | join(","))')
 check "unknown port retried as https ($names)" test "$names" = "http web.lab.test,www.lab.test"
 
+id=$(curl -fsS "$api/fed/v1/node" | yq -p json '.record.id')
+signed=$(host 172.30.0.11 | yq -p json "[.services[] | select(.node_id == \"$id\" and .signature != null)] | length")
+check "observations signed by boid-a ($signed)" test "$signed" -gt 0
+
 redis=$(host 172.30.0.12 | yq -p json '[.services[].name] | join(",")') || fail "redis host lookup"
 check "redis recorded ($redis)" test "$redis" = "redis6379"
 
 ua=$($compose logs web | grep -c 'boidscan/.*abuse: abuse@lab.invalid' || true)
 check "targets see the identifying user agent" test "$ua" -gt 0
 
-code=$(curl -s -o /dev/null -w '%{http_code}' -d cidr=172.30.0.12 "$api/optout")
-check "opt-out form accepted" test "$code" = 200
+check "operator excludes a host" $compose exec -T boid-a boidscan exclude -note "e2e" add 172.30.0.12
 code=$(curl -s -o /dev/null -w '%{http_code}' "$api/api/v1/host/172.30.0.12")
-check "opted-out host purged" test "$code" = 404
+check "excluded host purged" test "$code" = 404
 
 $compose run --rm scan
 code=$(curl -s -o /dev/null -w '%{http_code}' "$api/api/v1/host/172.30.0.12")
-check "opted-out host skipped on rescan" test "$code" = 404
+check "excluded host skipped on rescan" test "$code" = 404
 seen=$(curl -fsS "$api/api/v1/search?cidr=172.30.0.11/32" | yq -p json '.results | length')
 check "other hosts scanned again ($seen observations)" test "$seen" = 4
 
-lines=$($compose exec -T serve boidscan export ivre 2>/dev/null | wc -l)
+lines=$($compose exec -T boid-a boidscan export ivre 2>/dev/null | wc -l)
 check "ivre export has http records ($lines)" test "$lines" -gt 0
 
 echo "e2e passed"

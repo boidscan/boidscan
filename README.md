@@ -2,7 +2,7 @@
 
 A free and open source index of publicly reachable services, in the spirit of Shodan and Censys, run by its community.
 
-The name comes from [Boids](https://en.wikipedia.org/wiki/Boids), Craig Reynolds' 1986 flocking simulation. Many simple agents following a few local rules end up behaving like one flock. Boidscan nodes ("boids") are meant to work the same way. This release is a single node. Federation between nodes is the next milestone.
+The name comes from [Boids](https://en.wikipedia.org/wiki/Boids), Craig Reynolds' 1986 flocking simulation. Many simple agents following a few local rules end up behaving like one flock. Boidscan nodes ("boids") are meant to work the same way. Federation between nodes is in progress: boids can already find each other (see [Watch boids find each other](#watch-boids-find-each-other)), but they do not share work or results yet.
 
 ## What boidscan is, and what it is not
 
@@ -22,8 +22,8 @@ Boidscan never tries credentials, never exploits vulnerabilities and never hides
 
 - **Identity.** A node refuses to scan without an abuse contact. The contact and the project URL (default https://boidscan.network) appear in the HTTP User-Agent and on the info page that `boidscan serve` publishes on port 80.
 - **Rate ceiling.** 10,000 packets per second at most. You can configure less, never more.
-- **Exclusions.** IANA reserved ranges are always excluded. The opt-out list is checked before discovery, again before grabbing, and once more when results are stored.
-- **Opt-out.** Anyone can opt out a range of /16 or smaller through the form on the info page. The range is excluded from future scans and its stored results are deleted. Larger ranges go through the operator (`boidscan optout add`).
+- **Exclusions.** IANA reserved ranges are always excluded. Operators can exclude more ranges on their own node, for example ones their hosting provider forbids them to scan (`boidscan exclude add`). Exclusions are checked before discovery, again before grabbing, and once more when results are stored. They are never shared with other boids.
+- **No opt-out form.** Nobody can check who submits one, so it would let anyone hide any network. Anyone who does not want to be scanned blocks the scanning addresses in their firewall. Each boid lists them at `/fed/v1/scanners`.
 
 ## Before you run a node
 
@@ -101,16 +101,45 @@ The same data is available as JSON from `GET /api/v1/host/{ip}`. This is an HTTP
 
 ## Try it without scanning anything real
 
-The lab needs a copy of this repository (`git clone https://github.com/boidscan/boidscan`). It runs Postgres, three target containers and a node on a private Docker network. Nothing outside that network is scanned.
+The lab needs a copy of this repository (`git clone https://github.com/boidscan/boidscan`). It runs Postgres, three boids and three target containers on a private Docker network. Nothing outside that network is scanned.
 
 ```sh
-docker compose -f deploy/lab/compose.yaml up -d --build
-docker compose -f deploy/lab/compose.yaml run --rm --build scan
+./deploy/lab/flock.sh up      # start the flock
+docker compose -f deploy/lab/compose.yaml run --rm scan
 curl localhost:8080/api/v1/host/172.30.0.11
 curl 'localhost:8080/api/v1/search?cert=www.lab.test'
 ```
 
-Open http://localhost:8080 and search for `172.30.0.11` or `nginx`.
+Open http://localhost:8080 and search for `172.30.0.11` or `nginx`. The scan runs on behalf of boid-a, so its results are on boid-a only. Stop everything with `./deploy/lab/flock.sh down`.
+
+## Watch boids find each other
+
+Boids find each other like this:
+
+1. A new boid knows one or more seeds: boid URLs, or a DNS name whose A records point at boids.
+2. It sends its node record (name, address, abuse contact, signed with its own key) to a seed and gets back the boids the seed knows.
+3. Before it trusts a record, it asks the boid at that address to sign a random challenge. Only the owner of the key can, so nobody can point a record at someone else's server.
+4. Every second (in the lab; 30 seconds by default) each boid swaps what it knows with a few random peers. A boid that has not been heard from for 5 rounds is marked suspect, after 30 rounds down.
+
+The lab runs three boids that only know the DNS seed `seeds.boidscan.lab`:
+
+```sh
+./deploy/lab/flock.sh demo
+```
+
+The demo starts the flock, stops boid-c, waits until the others mark it down and starts it again. You see each step in the console:
+
+```
+boid-c-1  | 21:14:16 INFO  looking for the flock through seeds: seeds.boidscan.lab -> http://172.30.0.3, http://172.30.0.5, http://172.30.0.6
+boid-c-1  | 21:14:16 INFO  boid-b (thirhade) introduced itself endpoint=http://172.30.0.5
+boid-c-1  | 21:14:17 INFO  verified boid-b (thirhade): the boid at http://172.30.0.5 signed a challenge with its key
+boid-c-1  | 21:14:17 INFO  flock: 2 alive (boid-a, boid-b)
+boid-a-1  | 21:13:18 INFO  boid-c (ajqxcywu) has been quiet for 5s, marking it suspect
+boid-a-1  | 21:13:43 INFO  boid-c (ajqxcywu) is down: no news for 30s
+boid-a-1  | 21:13:45 INFO  boid-c (ajqxcywu) is back
+```
+
+`./deploy/lab/flock.sh logs` follows a running flock. Each boid's view is on http://localhost:8080, :8081 and :8082, and as JSON at `/fed/v1/peers`. Everything each boid logs, including every gossip exchange, is in `deploy/lab/logs/<boid>.jsonl`.
 
 ## Build from source
 
@@ -119,7 +148,7 @@ You only need Docker:
 ```sh
 ./build.sh        # run the tests, then build dist/boidscan
 ./build.sh image  # build the container image
-./build.sh e2e    # scan the isolated lab and check the results
+./build.sh e2e    # form the lab flock, scan the lab and check the results
 ```
 
 ## Commands
@@ -127,12 +156,16 @@ You only need Docker:
 ```
 boidscan migrate                     create or upgrade the database schema
 boidscan scan [flags] CIDR...        discover and grab services, store the results
-boidscan serve [flags]               info page with search, opt-out form and JSON API
+boidscan serve [flags]               info page with search and JSON API
 boidscan export ivre                 HTTP(S) results as zgrab2 JSON for IVRE
-boidscan optout add|rm|list [CIDR]   manage opt-outs without the form's size limit
+boidscan exclude add|rm|list [CIDR]  manage ranges this node never scans
 ```
 
-Settings come from flags or `BOIDSCAN_*` environment variables: `DB`, `PROJECT_URL`, `ABUSE_CONTACT`, `NODE_ID`, `LISTEN`, `OPTOUT_FILE`, `INTERFACE`, `GATEWAY_MAC`, `IP_LAYER`.
+Settings come from flags or `BOIDSCAN_*` environment variables: `DB`, `PROJECT_URL`, `ABUSE_CONTACT`, `KEY_FILE`, `NODE_NAME`, `LISTEN`, `EXCLUDE_FILE`, `INTERFACE`, `GATEWAY_MAC`, `IP_LAYER`.
+
+Each node signs its results with an Ed25519 key in `KEY_FILE`, created on first start. Its public half is the node ID. `serve` and `scan` must use the same key file.
+
+Federation: `ENDPOINT` (the node's `http://<IPv4>` address, empty disables federation), `SEEDS`, `GOSSIP_INTERVAL`. Logging: `LOG_LEVEL` (debug, info, warn, error) for the console, and `DEBUG_LOG`, a file that gets every message at debug level as JSON lines.
 
 `scan` needs the `NET_RAW` and `NET_ADMIN` capabilities for ZMap.
 
@@ -142,7 +175,8 @@ Settings come from flags or `BOIDSCAN_*` environment variables: `DB`, `PROJECT_U
 |---|---|
 | `GET /api/v1/host/{ip}` | the latest result per port and module for one address |
 | `GET /api/v1/search?cidr=&port=&q=&cert=&limit=&before=` | results, newest first; `q` is a substring match on the raw result, `cert` matches a SHA-256 fingerprint or hostname, `before` is the `next` value from the previous page |
-| `GET /api/v1/optouts` | the opt-out list (contacts are not published) |
+| `GET /fed/v1/peers` | this node's record and the boids it knows, with their state |
+| `GET /fed/v1/scanners` | the scanning addresses of this boid and every boid it has verified, one per line, for firewall block lists |
 
 Go client: `github.com/boidscan/boidscan/pkg/client`.
 

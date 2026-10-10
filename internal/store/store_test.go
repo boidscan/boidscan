@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/boidscan/boidscan/internal/grab"
+	"github.com/boidscan/boidscan/internal/identity"
 	"github.com/boidscan/boidscan/pkg/client"
 )
 
@@ -27,7 +28,7 @@ func openTestStore(t *testing.T) *Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(st.Close)
-	_, err = st.pool.Exec(ctx, `DROP TABLE IF EXISTS observations, scan_runs, optouts, schema_migrations CASCADE`)
+	_, err = st.pool.Exec(ctx, `DROP TABLE IF EXISTS observations, scan_runs, optouts, exclusions, peers, schema_migrations CASCADE`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,6 +37,8 @@ func openTestStore(t *testing.T) *Store {
 	}
 	return st
 }
+
+var testKey, _ = identity.Generate()
 
 func obs(ip string, port uint16, name, protocol, raw string) grab.Observation {
 	return grab.Observation{IP: netip.MustParseAddr(ip), Port: port, Name: name, Protocol: protocol, Status: "success", Raw: json.RawMessage(raw)}
@@ -53,7 +56,7 @@ func TestMigrateIdempotent(t *testing.T) {
 func TestObservationsRoundTrip(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()
-	run, err := st.StartRun(ctx, "node-a", []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}, []uint16{22, 443})
+	run, err := st.StartRun(ctx, testKey.ID(), []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}, []uint16{22, 443})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +67,7 @@ func TestObservationsRoundTrip(t *testing.T) {
 		// NUL in a banner must be storable; jsonb would reject it.
 		obs("192.0.2.2", 23, "telnet23", "telnet", `{"status":"success","result":{"banner":"\u0000ÿLogin:"}}`),
 	} {
-		if err := st.AddObservation(ctx, run, "node-a", o); err != nil {
+		if err := st.AddObservation(ctx, run, testKey, o); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -81,6 +84,11 @@ func TestObservationsRoundTrip(t *testing.T) {
 	}
 	if string(h.Services[0].Data) == "" || !json.Valid(h.Services[0].Data) {
 		t.Fatal("raw data not returned")
+	}
+	for _, o := range h.Services {
+		if err := o.Verify(); err != nil || o.NodeID != testKey.ID() {
+			t.Errorf("%s:%d: node %s, %v", o.IP, o.Port, o.NodeID, err)
+		}
 	}
 	var ssh struct {
 		Result struct {
@@ -145,47 +153,47 @@ func TestObservationsRoundTrip(t *testing.T) {
 	}
 }
 
-func TestOptOut(t *testing.T) {
+func TestExclusion(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()
-	run, _ := st.StartRun(ctx, "node-a", []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}, []uint16{80})
-	st.AddObservation(ctx, run, "node-a", obs("198.51.100.7", 80, "http80", "http", `{}`))
-	st.AddObservation(ctx, run, "node-a", obs("198.51.100.200", 80, "http80", "http", `{}`))
+	run, _ := st.StartRun(ctx, testKey.ID(), []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}, []uint16{80})
+	st.AddObservation(ctx, run, testKey, obs("198.51.100.7", 80, "http80", "http", `{}`))
+	st.AddObservation(ctx, run, testKey, obs("198.51.100.200", 80, "http80", "http", `{}`))
 
 	p := netip.MustParsePrefix("198.51.100.0/25")
-	if err := st.AddOptOut(ctx, p, "owner@example.org"); err != nil {
+	if err := st.AddExclusion(ctx, p, "hoster forbids it"); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.AddOptOut(ctx, p, "again"); err != nil {
-		t.Fatalf("duplicate opt-out must be a no-op: %v", err)
+	if err := st.AddExclusion(ctx, p, "again"); err != nil {
+		t.Fatalf("duplicate exclusion must be a no-op: %v", err)
 	}
-	n, err := st.PurgeOptedOut(ctx, p)
+	n, err := st.PurgeRange(ctx, p)
 	if err != nil || n != 1 {
 		t.Fatalf("purged %d, %v; want 1", n, err)
 	}
 
-	// An opt-out that arrives mid-scan must also block late inserts.
-	if err := st.AddObservation(ctx, run, "node-a", obs("198.51.100.8", 80, "http80", "http", `{}`)); err != nil {
+	// An exclusion added mid-scan must also block late inserts.
+	if err := st.AddObservation(ctx, run, testKey, obs("198.51.100.8", 80, "http80", "http", `{}`)); err != nil {
 		t.Fatal(err)
 	}
 	page, _ := st.Search(ctx, client.Query{CIDR: "198.51.100.0/24"})
 	if len(page.Results) != 1 || page.Results[0].IP != "198.51.100.200" {
-		t.Fatalf("unexpected results after opt-out: %+v", page.Results)
+		t.Fatalf("unexpected results after exclusion: %+v", page.Results)
 	}
 
-	set, err := st.OptOutSet(ctx)
+	set, err := st.ExclusionSet(ctx)
 	if err != nil || !set.Contains(netip.MustParseAddr("198.51.100.9")) {
-		t.Fatalf("OptOutSet = %v, %v", set, err)
+		t.Fatalf("ExclusionSet = %v, %v", set, err)
 	}
-	list, _ := st.OptOuts(ctx)
-	if len(list) != 1 || list[0].CIDR != "198.51.100.0/25" {
-		t.Fatalf("OptOuts = %+v", list)
+	list, _ := st.Exclusions(ctx)
+	if len(list) != 1 || list[0].Prefix != p || list[0].Note != "hoster forbids it" {
+		t.Fatalf("Exclusions = %+v", list)
 	}
-	ok, err := st.RemoveOptOut(ctx, p)
+	ok, err := st.RemoveExclusion(ctx, p)
 	if err != nil || !ok {
-		t.Fatalf("RemoveOptOut = %v, %v", ok, err)
+		t.Fatalf("RemoveExclusion = %v, %v", ok, err)
 	}
-	if ok, _ := st.RemoveOptOut(ctx, p); ok {
+	if ok, _ := st.RemoveExclusion(ctx, p); ok {
 		t.Fatal("second remove must report nothing removed")
 	}
 }

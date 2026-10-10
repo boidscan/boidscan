@@ -1,13 +1,29 @@
-# Isolated lab: boidscan scans only the containers on this network.
-#   docker compose -f deploy/lab/compose.yaml up -d --build
-#   docker compose -f deploy/lab/compose.yaml run --rm scan
-#   curl localhost:8080/api/v1/host/172.30.0.10
+# Isolated lab: three boids that find each other through a DNS seed, and
+# targets that boid-a's scanner may scan. Nothing outside this network is scanned.
+#   ./flock.sh            start the flock and watch it
+#   ./e2e.sh              scan the targets and check results and the flock
+#   curl localhost:8080/fed/v1/peers
 
-x-boidscan-env: &boidscan-env
-  BOIDSCAN_DB: postgres://boidscan:boidscan@db/boidscan?sslmode=disable
+x-boid: &boid
+  build: ../..
+  image: boidscan:lab
+  entrypoint: ["sh", "-c", "boidscan migrate && exec boidscan serve"]
+  healthcheck:
+    test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/80"]
+    interval: 1s
+    retries: 60
+  depends_on:
+    db:
+      condition: service_healthy
+
+# Every boid also answers to seeds.boidscan.lab, so that DNS seed resolves to all of them.
+x-boid-env: &boid-env
   BOIDSCAN_PROJECT_URL: https://boidscan.network
   BOIDSCAN_ABUSE_CONTACT: abuse@lab.invalid
-  BOIDSCAN_NODE_ID: lab-node-1
+  BOIDSCAN_KEY_FILE: /keys/node.key
+  BOIDSCAN_SEEDS: seeds.boidscan.lab
+  BOIDSCAN_GOSSIP_INTERVAL: 1s
+  BOIDSCAN_LAB: "true"
 
 networks:
   lab:
@@ -17,6 +33,9 @@ networks:
 
 volumes:
   certs:
+  key-a:
+  key-b:
+  key-c:
 
 services:
   db:
@@ -24,45 +43,78 @@ services:
     environment:
       POSTGRES_USER: boidscan
       POSTGRES_PASSWORD: boidscan
-      POSTGRES_DB: boidscan
+      POSTGRES_DB: boid_a
+    volumes:
+      - ./initdb.sql:/docker-entrypoint-initdb.d/initdb.sql:ro
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "boidscan"]
+      # TCP, because the init scripts run on a socket-only server first.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "boidscan"]
       interval: 2s
       retries: 30
     networks:
       lab:
         ipv4_address: 172.30.0.2
 
-  migrate:
-    build: ../..
-    command: migrate
-    environment: *boidscan-env
-    depends_on:
-      db:
-        condition: service_healthy
-    networks: [lab]
-
-  serve:
-    build: ../..
-    command: serve
-    environment: *boidscan-env
+  boid-a:
+    <<: *boid
+    environment:
+      <<: *boid-env
+      BOIDSCAN_DB: postgres://boidscan:boidscan@db/boid_a?sslmode=disable
+      BOIDSCAN_NODE_NAME: boid-a
+      BOIDSCAN_ENDPOINT: http://172.30.0.3
+      BOIDSCAN_DEBUG_LOG: /logs/boid-a.jsonl
+    volumes: ["./logs:/logs", "key-a:/keys"]
     ports: ["${LAB_PORT:-8080}:80"]
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
     networks:
       lab:
         ipv4_address: 172.30.0.3
+        aliases: [seeds.boidscan.lab]
 
+  boid-b:
+    <<: *boid
+    environment:
+      <<: *boid-env
+      BOIDSCAN_DB: postgres://boidscan:boidscan@db/boid_b?sslmode=disable
+      BOIDSCAN_NODE_NAME: boid-b
+      BOIDSCAN_ENDPOINT: http://172.30.0.5
+      BOIDSCAN_DEBUG_LOG: /logs/boid-b.jsonl
+    volumes: ["./logs:/logs", "key-b:/keys"]
+    ports: ["8081:80"]
+    networks:
+      lab:
+        ipv4_address: 172.30.0.5
+        aliases: [seeds.boidscan.lab]
+
+  boid-c:
+    <<: *boid
+    environment:
+      <<: *boid-env
+      BOIDSCAN_DB: postgres://boidscan:boidscan@db/boid_c?sslmode=disable
+      BOIDSCAN_NODE_NAME: boid-c
+      BOIDSCAN_ENDPOINT: http://172.30.0.6
+      BOIDSCAN_DEBUG_LOG: /logs/boid-c.jsonl
+    volumes: ["./logs:/logs", "key-c:/keys"]
+    ports: ["8082:80"]
+    networks:
+      lab:
+        ipv4_address: 172.30.0.6
+        aliases: [seeds.boidscan.lab]
+
+  # boid-a's scanner: same database and key, so its results are signed by boid-a.
   scan:
-    build: ../..
+    image: boidscan:lab
     profiles: [scan]
     command: scan -lab -ip-layer -interface eth0 -rate 200 -ports 22,80,443,2200,6379,9443 172.30.0.0/24
-    environment: *boidscan-env
+    environment:
+      <<: *boid-env
+      BOIDSCAN_DB: postgres://boidscan:boidscan@db/boid_a?sslmode=disable
+      BOIDSCAN_NODE_NAME: boid-a-scan
+      BOIDSCAN_DEBUG_LOG: /logs/boid-a-scan.jsonl
+    volumes: ["./logs:/logs", "key-a:/keys"]
     cap_add: [NET_RAW, NET_ADMIN]
     depends_on:
-      migrate:
-        condition: service_completed_successfully
+      boid-a:
+        condition: service_healthy
     networks:
       lab:
         ipv4_address: 172.30.0.4

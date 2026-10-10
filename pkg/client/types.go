@@ -2,7 +2,10 @@ package client
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
+
+	"github.com/boidscan/boidscan/pkg/sig"
 )
 
 // Observation is one zgrab2 module result for one ip:port, as seen by one node.
@@ -19,6 +22,19 @@ type Observation struct {
 	CertSHA256 string          `json:"cert_sha256,omitempty"`
 	CertNames  []string        `json:"cert_names,omitempty"`
 	Data       json.RawMessage `json:"data"`
+	// Signature is NodeID's Ed25519 signature; see Verify.
+	Signature []byte `json:"signature,omitempty"`
+}
+
+// Verify checks that NodeID signed this observation.
+func (o Observation) Verify() error {
+	if len(o.Signature) == 0 {
+		return errors.New("observation is not signed")
+	}
+	if !sig.Verify(o.NodeID, sig.ObservationMessage(o.IP, o.Port, o.Name, o.Protocol, o.Status, o.SeenAt, o.Data), o.Signature) {
+		return errors.New("observation signature does not match")
+	}
+	return nil
 }
 
 type Host struct {
@@ -43,9 +59,4 @@ type Page struct {
 	Results []Observation `json:"results"`
 	// Next is passed as Query.Before to fetch the next page. Zero means no more results.
 	Next int64 `json:"next"`
-}
-
-type OptOut struct {
-	CIDR    string    `json:"cidr"`
-	AddedAt time.Time `json:"added_at"`
 }

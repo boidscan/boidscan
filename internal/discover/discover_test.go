@@ -10,9 +10,9 @@ import (
 	"github.com/boidscan/boidscan/internal/policy"
 )
 
-func testPolicy(t *testing.T, optout string) *policy.Policy {
+func testPolicy(t *testing.T, exclude string) *policy.Policy {
 	t.Helper()
-	opt, err := netset.Read(strings.NewReader(optout))
+	opt, err := netset.Read(strings.NewReader(exclude))
 	if err != nil {
 		t.Fatal(err)
 	}

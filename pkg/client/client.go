@@ -107,9 +107,3 @@ func (c *Client) SearchAll(ctx context.Context, q Query, fn func(Observation) bo
 		q.Before = p.Next
 	}
 }
-
-func (c *Client) OptOuts(ctx context.Context) ([]OptOut, error) {
-	var list []OptOut
-	err := c.get(ctx, "/api/v1/optouts", nil, &list)
-	return list, err
-}

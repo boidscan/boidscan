@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
-	"net/url"
 	"strings"
 	"testing"
 
@@ -20,8 +19,6 @@ type fakeBackend struct {
 	hosts   map[netip.Addr]client.Host
 	pages   []client.Page
 	queries []client.Query
-	optouts []netip.Prefix
-	purged  []netip.Prefix
 }
 
 func (f *fakeBackend) Host(_ context.Context, ip netip.Addr) (client.Host, error) {
@@ -39,24 +36,6 @@ func (f *fakeBackend) Search(_ context.Context, q client.Query) (client.Page, er
 	p := f.pages[0]
 	f.pages = f.pages[1:]
 	return p, nil
-}
-
-func (f *fakeBackend) OptOuts(context.Context) ([]client.OptOut, error) {
-	var out []client.OptOut
-	for _, p := range f.optouts {
-		out = append(out, client.OptOut{CIDR: p.String()})
-	}
-	return out, nil
-}
-
-func (f *fakeBackend) AddOptOut(_ context.Context, p netip.Prefix, _ string) error {
-	f.optouts = append(f.optouts, p)
-	return nil
-}
-
-func (f *fakeBackend) PurgeOptedOut(_ context.Context, p netip.Prefix) (int64, error) {
-	f.purged = append(f.purged, p)
-	return 0, nil
 }
 
 var testID = policy.Identity{ProjectURL: "https://boidscan.example", AbuseContact: "abuse@boidscan.example"}
@@ -113,40 +92,10 @@ func TestIndexNamesIdentity(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	for _, want := range []string{testID.ProjectURL, testID.AbuseContact, `action="/optout"`} {
+	for _, want := range []string{testID.ProjectURL, testID.AbuseContact} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index page missing %q", want)
 		}
-	}
-}
-
-func TestOptOutForm(t *testing.T) {
-	fb := &fakeBackend{}
-	srv := httptest.NewServer(New(fb, testID).Handler())
-	defer srv.Close()
-
-	post := func(cidr string) int {
-		resp, err := http.PostForm(srv.URL+"/optout", url.Values{"cidr": {cidr}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
-		return resp.StatusCode
-	}
-	if got := post("1.0.0.0/8"); got != http.StatusBadRequest {
-		t.Errorf("/8 via form: status %d, want 400", got)
-	}
-	if got := post("garbage"); got != http.StatusBadRequest {
-		t.Errorf("garbage: status %d, want 400", got)
-	}
-	if got := post("198.51.100.0/24"); got != http.StatusOK {
-		t.Errorf("valid opt-out: status %d, want 200", got)
-	}
-	if len(fb.optouts) != 1 || len(fb.purged) != 1 || fb.purged[0].String() != "198.51.100.0/24" {
-		t.Fatalf("opt-out not stored and purged: %+v %+v", fb.optouts, fb.purged)
-	}
-	if got := post("203.0.113.0/24"); got != http.StatusTooManyRequests {
-		t.Errorf("second opt-out within a minute: status %d, want 429", got)
 	}
 }
 
