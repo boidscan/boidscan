@@ -12,8 +12,8 @@ Your node only knows about addresses it has scanned itself. There is no shared i
 
 ## What a node does
 
-1. [ZMap](https://github.com/zmap/zmap) finds open TCP ports on the ranges you give it.
-2. [ZGrab2](https://github.com/zmap/zgrab2) records what each service announces during a normal handshake: banners, HTTP responses, TLS certificates, and SSH, Postgres, Redis and similar handshakes.
+1. [ZMap](https://github.com/zmap/zmap) finds open TCP ports on the ranges you give it. By default it checks the same ports Shodan does, about 3,800 of them ([list](internal/grab/ports.txt)).
+2. [ZGrab2](https://github.com/zmap/zgrab2) records what each service announces during a normal handshake. Well-known ports get a protocol-specific module (SSH, SMTP including 465 and 587, IMAP, Postgres, Redis, SMB, MQTT and others). On any other port boidscan reads the banner and tries HTTP, then HTTPS.
 3. Results are stored in PostgreSQL and published through a public JSON API.
 
 Boidscan never tries credentials, never exploits vulnerabilities and never hides who is scanning.
@@ -63,6 +63,8 @@ You need [Docker](https://docs.docker.com/get-started/get-docker/) and an addres
    The last line reports how many services answered, for example `scan finished run=1 observations=3 successful=3`.
 
 5. Open http://localhost:8080, type the address into the search box and press Search. Each open port is listed, and "Raw result" shows everything the service announced.
+
+To check other ports, pass `-ports` before the address, for example `-ports 587`, `-ports 22,80,8000-8100` or `-ports 1-65535` for all of them.
 
 To scan a range instead of one address, use CIDR notation: `203.0.113.0/24` covers the 256 addresses from `203.0.113.0` to `203.0.113.255`. Stop everything with `docker compose down`. The results are kept until you run `docker compose down -v`.
 
@@ -169,7 +171,7 @@ IVRE's zgrab2 importer only reads HTTP(S) results. The other protocols are avail
 
 **`required variable BOIDSCAN_ABUSE_CONTACT is missing a value`.** The `.env` file is missing or not in the same folder as `compose.yaml`.
 
-**The scan finishes with `observations=0`.** Either nothing answered on the ports boidscan checks (21, 22, 23, 25, 80, 110, 143, 443, 1883, 3306, 5432, 6379, 8080, 8443 and 27017), or ZMap sent its packets out of the wrong network interface. The scan container uses the host's network. Pass the interface explicitly, for example `docker compose run --rm scan -interface eth0 203.0.113.5`. On VPNs, add `-ip-layer`.
+**The scan finishes with `observations=0`.** Either nothing answered on the [ports boidscan checks](internal/grab/ports.txt), or ZMap sent its packets out of the wrong network interface. The scan container uses the host's network. Pass the interface explicitly, for example `docker compose run --rm scan -interface eth0 203.0.113.5`. On VPNs, add `-ip-layer`.
 
 **Nothing on http://localhost:8080.** Check `docker compose ps` and `docker compose logs serve`. Port 8080 may already be in use. Change the left side of `8080:80` in `compose.yaml`.
 

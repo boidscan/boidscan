@@ -46,7 +46,7 @@ services:
     build: ../..
     command: serve
     environment: *boidscan-env
-    ports: ["8080:80"]
+    ports: ["${LAB_PORT:-8080}:80"]
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -57,7 +57,7 @@ services:
   scan:
     build: ../..
     profiles: [scan]
-    command: scan -lab -ip-layer -interface eth0 -rate 200 172.30.0.0/24
+    command: scan -lab -ip-layer -interface eth0 -rate 200 -ports 22,80,443,2200,6379,9443 172.30.0.0/24
     environment: *boidscan-env
     cap_add: [NET_RAW, NET_ADMIN]
     depends_on:
@@ -86,7 +86,7 @@ services:
 
   sshd:
     image: alpine:3.22.1
-    command: sh -c "apk add --no-cache openssh >/dev/null && ssh-keygen -A && exec /usr/sbin/sshd -D -e"
+    command: sh -c "apk add --no-cache openssh >/dev/null && ssh-keygen -A && exec /usr/sbin/sshd -D -e -p 22 -p 2200"
     healthcheck:
       test: ["CMD", "nc", "-z", "127.0.0.1", "22"]
       interval: 2s

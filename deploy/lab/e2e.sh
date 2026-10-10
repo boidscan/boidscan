@@ -4,7 +4,7 @@ set -eu
 
 cd "$(dirname "$0")"
 compose="docker compose -f compose.yaml"
-api=http://localhost:8080
+api=http://localhost:${LAB_PORT:-8080}
 
 cleanup() {
 	if [ "${KEEP_LAB:-}" != 1 ]; then
@@ -38,6 +38,12 @@ check "ssh banner recorded ($banner)" test -n "$banner" -a "$banner" != null
 names=$(curl -fsS "$api/api/v1/search?cert=www.lab.test" | yq -p json '.results[0].cert_names | join(",")')
 check "tls certificate indexed by SAN ($names)" test "$names" = "web.lab.test,www.lab.test"
 
+generic=$(host 172.30.0.11 | yq -p json '.services[] | select(.port == 2200 and .name == "banner") | .data.result.banner | test("^SSH-2.0-")') || fail "generic banner lookup"
+check "unknown port grabbed with banner module" test "$generic" = true
+
+names=$(curl -fsS "$api/api/v1/search?cert=www.lab.test&port=9443" | yq -p json '.results[0].name + " " + (.results[0].cert_names | join(","))')
+check "unknown port retried as https ($names)" test "$names" = "http web.lab.test,www.lab.test"
+
 redis=$(host 172.30.0.12 | yq -p json '[.services[].name] | join(",")') || fail "redis host lookup"
 check "redis recorded ($redis)" test "$redis" = "redis6379"
 
@@ -53,7 +59,7 @@ $compose run --rm scan
 code=$(curl -s -o /dev/null -w '%{http_code}' "$api/api/v1/host/172.30.0.12")
 check "opted-out host skipped on rescan" test "$code" = 404
 seen=$(curl -fsS "$api/api/v1/search?cidr=172.30.0.11/32" | yq -p json '.results | length')
-check "other hosts scanned again ($seen observations)" test "$seen" = 2
+check "other hosts scanned again ($seen observations)" test "$seen" = 4
 
 lines=$($compose exec -T serve boidscan export ivre 2>/dev/null | wc -l)
 check "ivre export has http records ($lines)" test "$lines" -gt 0

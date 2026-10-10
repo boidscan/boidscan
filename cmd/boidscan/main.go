@@ -10,7 +10,6 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -109,21 +108,30 @@ func cmdMigrate(ctx context.Context, args []string) error {
 	return st.Migrate(ctx)
 }
 
-func parsePorts(s string, known []grab.Service) ([]grab.Service, error) {
+// parsePorts reads a list like "22,80,8000-8100". An empty list means the defaults.
+func parsePorts(s string) ([]uint16, error) {
 	if s == "" {
-		return known, nil
+		return grab.DefaultPorts(), nil
 	}
-	var out []grab.Service
+	seen := map[uint16]bool{}
+	var out []uint16
 	for _, part := range strings.Split(s, ",") {
-		n, err := strconv.ParseUint(strings.TrimSpace(part), 10, 16)
-		if err != nil {
-			return nil, fmt.Errorf("port %q: %w", part, err)
+		part = strings.TrimSpace(part)
+		lo, hi, isRange := strings.Cut(part, "-")
+		if !isRange {
+			hi = lo
 		}
-		i := slices.IndexFunc(known, func(svc grab.Service) bool { return svc.Port == uint16(n) })
-		if i < 0 {
-			return nil, fmt.Errorf("port %d has no grab module configured", n)
+		from, err1 := strconv.ParseUint(lo, 10, 16)
+		to, err2 := strconv.ParseUint(hi, 10, 16)
+		if err1 != nil || err2 != nil || from == 0 || to < from {
+			return nil, fmt.Errorf("port %q: want a number or range between 1 and 65535", part)
 		}
-		out = append(out, known[i])
+		for n := from; n <= to; n++ {
+			if !seen[uint16(n)] {
+				seen[uint16(n)] = true
+				out = append(out, uint16(n))
+			}
+		}
 	}
 	return out, nil
 }
@@ -135,7 +143,7 @@ func cmdScan(ctx context.Context, args []string) error {
 	hostname, _ := os.Hostname()
 	nodeID := fs.String("node-id", env("NODE_ID", hostname), "identifier recorded with every observation")
 	rate := fs.Int("rate", 0, fmt.Sprintf("packets per second, at most %d (default %d)", policy.MaxRate, policy.MaxRate))
-	ports := fs.String("ports", "", "comma separated subset of the default service ports")
+	ports := fs.String("ports", "", "ports or ranges to scan, e.g. 22,80,8000-8100 (default: Shodan's port list)")
 	optoutFile := fs.String("optout-file", env("OPTOUT_FILE", ""), "extra opt-out list, one CIDR per line")
 	lab := fs.Bool("lab", false, "allow RFC 1918 targets, and only those, for testing on your own network")
 	zmapBin := fs.String("zmap", env("ZMAP", "zmap"), "zmap binary")
@@ -186,21 +194,22 @@ func cmdScan(ctx context.Context, args []string) error {
 	if err := pol.CheckTargets(targets); err != nil {
 		return err
 	}
-	services, err := parsePorts(*ports, grab.DefaultServices(pol.UserAgent()))
+	portList, err := parsePorts(*ports)
 	if err != nil {
 		return err
 	}
+	plan := grab.NewPlan(pol.UserAgent(), portList)
 	blocklist, err := pol.WriteBlocklist()
 	if err != nil {
 		return err
 	}
 	defer os.Remove(blocklist)
 
-	runID, err := st.StartRun(ctx, *nodeID, targets, grab.Ports(services))
+	runID, err := st.StartRun(ctx, *nodeID, targets, plan.Ports())
 	if err != nil {
 		return err
 	}
-	slog.Info("scan started", "run", runID, "targets", targets, "ports", grab.Ports(services), "rate", pol.Rate)
+	slog.Info("scan started", "run", runID, "targets", targets, "ports", len(plan.Ports()), "rate", pol.Rate)
 
 	scanCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -212,7 +221,7 @@ func cmdScan(ctx context.Context, args []string) error {
 		discErr <- discover.Run(scanCtx, discover.Options{
 			Binary:     *zmapBin,
 			Targets:    targets,
-			Ports:      grab.Ports(services),
+			Ports:      plan.Ports(),
 			Blocklist:  blocklist,
 			Rate:       pol.Rate,
 			Interface:  *iface,
@@ -221,7 +230,7 @@ func cmdScan(ctx context.Context, args []string) error {
 		}, pol, hits)
 	}()
 	go func() {
-		grabErr <- grab.Run(scanCtx, *zgrabBin, services, pol, blocklist, hits, obs)
+		grabErr <- grab.Run(scanCtx, *zgrabBin, plan, pol, blocklist, hits, obs)
 	}()
 
 	var stored, success int

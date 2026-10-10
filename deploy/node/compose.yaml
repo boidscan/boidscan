@@ -4,7 +4,7 @@
 #   docker compose run --rm scan 203.0.113.5
 
 x-boidscan: &boidscan
-  image: ghcr.io/boidscan/boidscan:0.0.1
+  image: ghcr.io/boidscan/boidscan:0.0.2
   environment: &boidscan-env
     BOIDSCAN_DB: postgres://boidscan:boidscan@db/boidscan?sslmode=disable
     BOIDSCAN_ABUSE_CONTACT: ${BOIDSCAN_ABUSE_CONTACT:?put BOIDSCAN_ABUSE_CONTACT=you@example.org in a .env file next to compose.yaml}
