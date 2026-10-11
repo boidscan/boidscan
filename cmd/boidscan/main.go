@@ -263,11 +263,12 @@ func cmdScan(ctx context.Context, args []string) error {
 
 // flockFlags are shared by serve and worker; boids only cooperate when they match.
 type flockFlags struct {
-	name     string
-	endpoint string
-	lab      bool
-	labRange string
-	forge    bool
+	name      string
+	endpoint  string
+	lab       bool
+	labRange  string
+	testRange string
+	forge     bool
 	rootFlag
 }
 
@@ -277,6 +278,7 @@ func (f *flockFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.endpoint, "endpoint", env("ENDPOINT", ""), "http://<public IPv4> where other boids reach this node; empty disables federation")
 	fs.BoolVar(&f.lab, "lab", env("LAB", "") == "true", "lab flock: RFC 1918 endpoints and targets, and the lab catalog")
 	fs.StringVar(&f.labRange, "lab-range", env("LAB_RANGE", ""), "the range a lab flock sweeps, e.g. 172.30.0.0/26")
+	fs.StringVar(&f.testRange, "test-range", env("TEST_RANGE", ""), "test flock: sweep only these public IPv4 addresses, comma-separated; needs -policy-root")
 	fs.BoolVar(&f.forge, "forge", env("FORGE", "") == "true", "lab only: report false results and defend them, to test how other boids catch it")
 	f.rootFlag.register(fs)
 }
@@ -303,6 +305,9 @@ func (f *flockFlags) catalog() (catalog.Catalog, error) {
 	if f.forge && !f.lab {
 		return catalog.Catalog{}, errors.New("-forge only works with -lab")
 	}
+	if f.testRange != "" {
+		return f.testCatalog()
+	}
 	if !f.lab {
 		return catalog.Default(), nil
 	}
@@ -311,6 +316,24 @@ func (f *flockFlags) catalog() (catalog.Catalog, error) {
 		return catalog.Catalog{}, fmt.Errorf("lab mode needs -lab-range: %w", err)
 	}
 	return catalog.Lab(p)
+}
+
+func (f *flockFlags) testCatalog() (catalog.Catalog, error) {
+	if f.lab {
+		return catalog.Catalog{}, errors.New("-test-range and -lab exclude each other")
+	}
+	if f.root == "" {
+		return catalog.Catalog{}, errors.New("-test-range needs the test flock's maintainer keys in -policy-root")
+	}
+	var addrs []netip.Addr
+	for _, v := range strings.Split(f.testRange, ",") {
+		a, err := netip.ParseAddr(strings.TrimSpace(v))
+		if err != nil {
+			return catalog.Catalog{}, fmt.Errorf("-test-range: %w", err)
+		}
+		addrs = append(addrs, a)
+	}
+	return catalog.Test(addrs)
 }
 
 func cmdWorker(ctx context.Context, args []string) error {
@@ -403,7 +426,7 @@ func cmdServe(ctx context.Context, args []string) error {
 		return err
 	}
 	trust := fed.DefaultTrust()
-	if ff.lab {
+	if ff.lab || ff.testRange != "" {
 		trust = fed.LabTrust()
 	}
 	if ff.root != "" {

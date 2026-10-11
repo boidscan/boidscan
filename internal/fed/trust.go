@@ -66,7 +66,7 @@ func DefaultTrust() TrustConfig {
 	}
 }
 
-// LabTrust checks every result, so a small lab reaches verdicts in minutes.
+// LabTrust checks every result, so a lab or test flock reaches verdicts in minutes.
 func LabTrust() TrustConfig {
 	c := DefaultTrust()
 	c.TrustAfter, c.SampleProbation, c.SampleTrusted = 2, 1, 1

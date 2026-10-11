@@ -86,6 +86,30 @@ func Lab(universe netip.Prefix) (Catalog, error) {
 	return c, nil
 }
 
+// MaxTestAddrs bounds a test flock to a handful of servers.
+const MaxTestAddrs = 64
+
+// Test sweeps only the given public IPv4 addresses, one block each, with the
+// default port groups: a test flock over the internet that scans nothing but
+// its own servers.
+func Test(addrs []netip.Addr) (Catalog, error) {
+	c := Default()
+	c.Name, c.BlockBits, c.Universe = "test", 32, nil
+	if len(addrs) == 0 || len(addrs) > MaxTestAddrs {
+		return c, fmt.Errorf("test range: want 1 to %d addresses, got %d", MaxTestAddrs, len(addrs))
+	}
+	reserved := netset.Reserved(false)
+	for _, a := range addrs {
+		if !a.Is4() || reserved.Contains(a) {
+			return c, fmt.Errorf("test range: %s is not a public IPv4 address", a)
+		}
+		c.Universe = append(c.Universe, netip.PrefixFrom(a, 32))
+	}
+	slices.SortFunc(c.Universe, func(a, b netip.Prefix) int { return a.Addr().Compare(b.Addr()) })
+	c.Universe = slices.Compact(c.Universe)
+	return c, nil
+}
+
 // Hash identifies the catalog, including the module configuration.
 func (c Catalog) Hash() string {
 	var b strings.Builder

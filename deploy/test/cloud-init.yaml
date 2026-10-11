@@ -1,0 +1,89 @@
+#cloud-config
+# A boid of a test flock (-test-range) on Ubuntu 26.04, amd64 or arm64.
+# Fill in the four values in /opt/boidscan/flock.env below; they must be the same on every server.
+# After boot: docker save boidscan:test | ssh root@<ip> docker load
+#   ssh root@<ip> 'cd /opt/boidscan && docker compose up -d'
+
+package_update: true
+packages:
+  - docker.io
+  - docker-compose-v2
+
+write_files:
+  - path: /opt/boidscan/flock.env
+    content: |
+      RANGE=IP1,IP2,IP3,IP4
+      ROOT=MAINTAINER_KEY_ID:1
+      SEEDS=http://IP1
+      ABUSE_CONTACT=
+
+  - path: /opt/boidscan/compose.yaml
+    content: |
+      x-boid: &boid
+        image: boidscan:test
+        network_mode: host
+        volumes: ["key:/keys"]
+        environment:
+          BOIDSCAN_DB: postgres://boidscan:boidscan@127.0.0.1:5432/boidscan?sslmode=disable
+          BOIDSCAN_KEY_FILE: /keys/node.key
+          BOIDSCAN_NODE_NAME: ${NAME}
+          BOIDSCAN_ENDPOINT: ${ENDPOINT}
+          BOIDSCAN_ABUSE_CONTACT: ${ABUSE_CONTACT:?set ABUSE_CONTACT in flock.env}
+          BOIDSCAN_SEEDS: ${SEEDS}
+          BOIDSCAN_TEST_RANGE: ${RANGE}
+          BOIDSCAN_POLICY_ROOT: ${ROOT}
+          # The real policy at boidscan.network does not verify against a test root.
+          BOIDSCAN_POLICY_URL: ""
+          BOIDSCAN_GOSSIP_INTERVAL: 5s
+
+      volumes:
+        db:
+        key:
+
+      services:
+        db:
+          image: postgres:17.6-bookworm
+          environment:
+            POSTGRES_USER: boidscan
+            POSTGRES_PASSWORD: boidscan
+            POSTGRES_DB: boidscan
+          ports: ["127.0.0.1:5432:5432"]
+          volumes: ["db:/var/lib/postgresql/data"]
+          restart: unless-stopped
+          healthcheck:
+            test: ["CMD", "pg_isready", "-U", "boidscan"]
+            interval: 2s
+            retries: 30
+
+        migrate:
+          <<: *boid
+          command: migrate
+          depends_on:
+            db:
+              condition: service_healthy
+
+        serve:
+          <<: *boid
+          command: serve
+          restart: unless-stopped
+          depends_on:
+            migrate:
+              condition: service_completed_successfully
+
+        worker:
+          <<: *boid
+          command: worker -rate 1000
+          cap_add: [NET_RAW, NET_ADMIN]
+          restart: unless-stopped
+          depends_on: [serve]
+
+runcmd:
+  - systemctl enable --now docker
+  - docker pull postgres:17.6-bookworm
+  - |
+    ip=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+    {
+      cat /opt/boidscan/flock.env
+      echo "NAME=$(hostname -s | cut -c1-32)"
+      echo "ENDPOINT=http://$ip"
+    } > /opt/boidscan/.env

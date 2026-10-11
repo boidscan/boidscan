@@ -98,3 +98,29 @@ func TestValid(t *testing.T) {
 		}
 	}
 }
+
+func TestTest(t *testing.T) {
+	a, b := netip.MustParseAddr("9.9.9.9"), netip.MustParseAddr("1.1.1.1")
+	c, err := Test([]netip.Addr{a, b, a})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blocks := c.Blocks(nil); len(blocks) != 2 || blocks[0].String() != "1.1.1.1/32" || blocks[1].String() != "9.9.9.9/32" {
+		t.Fatalf("blocks = %v", blocks)
+	}
+	if !c.Valid(Unit{netip.MustParsePrefix("9.9.9.9/32"), 1}) || c.Valid(Unit{netip.MustParsePrefix("9.9.9.8/32"), 0}) {
+		t.Fatal("Valid must accept exactly the listed addresses")
+	}
+	other, _ := Test([]netip.Addr{b, a})
+	if c.Hash() != other.Hash() || c.Hash() == Default().Hash() {
+		t.Fatal("the hash must ignore order and differ from the default catalog")
+	}
+	for _, bad := range []string{"10.0.0.1", "192.0.2.1", "2001:db8::1", "2a01:4f8::1"} {
+		if _, err := Test([]netip.Addr{netip.MustParseAddr(bad)}); err == nil {
+			t.Errorf("%s must be rejected", bad)
+		}
+	}
+	if _, err := Test(nil); err == nil {
+		t.Fatal("an empty test range must be rejected")
+	}
+}

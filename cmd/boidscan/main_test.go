@@ -32,3 +32,19 @@ func TestEnv(t *testing.T) {
 		t.Errorf("env fallback = %q", got)
 	}
 }
+
+func TestTestRange(t *testing.T) {
+	f := flockFlags{testRange: "1.1.1.1, 9.9.9.9"}
+	if _, err := f.catalog(); err == nil {
+		t.Fatal("-test-range without -policy-root must be rejected")
+	}
+	f.root = "x"
+	c, err := f.catalog()
+	if err != nil || c.Name != "test" || len(c.Universe) != 2 {
+		t.Fatalf("got %+v, %v", c, err)
+	}
+	f.lab = true
+	if _, err := f.catalog(); err == nil {
+		t.Fatal("-test-range with -lab must be rejected")
+	}
+}
