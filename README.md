@@ -2,13 +2,13 @@
 
 A free and open source index of publicly reachable services, in the spirit of Shodan and Censys, run by its community.
 
-The name comes from [Boids](https://en.wikipedia.org/wiki/Boids), Craig Reynolds' 1986 flocking simulation. Many simple agents following a few local rules end up behaving like one flock. Boidscan nodes ("boids") are meant to work the same way. Federation between nodes is in progress. In the lab, boids already find each other, share out a sweep of an address range and keep copies of each other's results (see [Watch boids find each other](#watch-boids-find-each-other) and [Watch the flock sweep](#watch-the-flock-sweep)). There is no public flock yet.
+The name comes from [Boids](https://en.wikipedia.org/wiki/Boids), Craig Reynolds' 1986 flocking simulation. Many simple agents following a few local rules end up behaving like one flock. Boidscan nodes ("boids") are meant to work the same way: they find each other, share out a sweep of the address space and keep copies of each other's results (see [Watch boids find each other](#watch-boids-find-each-other) and [Watch the flock sweep](#watch-the-flock-sweep)). The public flock started in October 2026 with a single boid at http://157.180.95.126. Its rules are in the signed [flock policy](https://github.com/boidscan/flock-policy).
 
 ## What boidscan is, and what it is not
 
 Boidscan is not a public website like Shodan where you can search the whole internet. You run your own node on your own computer or server. The node scans the addresses you give it and stores what it finds. You then search those results in your browser at http://localhost:8080 or through the JSON API.
 
-Your node only knows about addresses it has scanned itself. There is no shared index of the whole internet yet. That comes with federation.
+A node on its own only knows about addresses it has scanned itself. A boid in the flock also holds results of other boids, and looking up an address asks the boids that keep that part of the address space. Searching by text or certificate still covers only the boid you ask.
 
 ## What a node does
 
@@ -75,6 +75,39 @@ To scan a range instead of one address, use CIDR notation: `203.0.113.0/24` cove
 The search box takes an IP address, a CIDR range or any text, such as `nginx` or a hostname from a certificate. An optional port narrows the results.
 
 If the scan finishes with `observations=0` although the address has open ports, see [Troubleshooting](#troubleshooting).
+
+## Join the flock
+
+A boid in the flock takes part in the sweep of the whole IPv4 internet. It scans whatever share of the address space the flock gives it, on the ports of the default catalog, at up to 10,000 packets per second. Read [Before you run a node](#before-you-run-a-node) again: your hosting provider will see this traffic and may get abuse reports about it.
+
+You need a server with a public IPv4 address and port 80 reachable from the internet. Other boids talk to yours there, and the scanned hosts find your info page there.
+
+**On a new Ubuntu 26.04 server**, use [deploy/node/cloud-init.yaml](deploy/node/cloud-init.yaml) as user data. Fill in `ABUSE_CONTACT` first. `RATE` sets your own limit in packets per second. The boid starts when cloud-init finishes.
+
+**On a server you already run**, use the compose file from [Scan a single address](#scan-a-single-address) and add to `.env`:
+
+```sh
+BOIDSCAN_ENDPOINT=http://203.0.113.5
+BOIDSCAN_PORT=80
+BOIDSCAN_NODE_NAME=my-boid
+```
+
+`BOIDSCAN_ENDPOINT` is the server's public address, without a port. Then start the boid with its worker:
+
+```sh
+docker compose --profile sweep up -d
+```
+
+The boid fetches the [flock policy](https://github.com/boidscan/flock-policy) and finds the other boids through the seeds the policy names. Check it:
+
+```sh
+docker compose exec serve boidscan policy show
+curl http://203.0.113.5/fed/v1/peers
+```
+
+`policy show` should end with `this boid may sweep`. A new boid starts on probation: the others check a sample of its results before they trust it with theirs.
+
+To leave the sweep, stop the worker with `docker compose stop worker`. The boid keeps serving its results.
 
 ## What a result looks like
 
