@@ -375,6 +375,10 @@ func TestAdopt(t *testing.T) {
 	if changed || !errors.Is(err, ErrNotNewer) {
 		t.Fatalf("replay: changed %v, %v", changed, err)
 	}
+	s, changed, err = Adopt(context.Background(), st, root, "me", Bundle{Chain: []Document{doc(t, body(1, root), k...), doc(t, b, k...), doc(t, body(3, root), k...)}}, now)
+	if err != nil || !changed || s.Serial() != 3 {
+		t.Fatalf("bundle from policy 1 on: %d, %v, %v", s.Serial(), changed, err)
+	}
 }
 
 func TestBuiltInRoot(t *testing.T) {

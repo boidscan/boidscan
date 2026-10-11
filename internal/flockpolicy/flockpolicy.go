@@ -486,7 +486,8 @@ type Store interface {
 }
 
 // Adopt stores whatever in b is newer than what st holds and returns the new
-// state. It stops the chain at the first document it rejects.
+// state. It skips policies the boid already has, as a bundle from the policy
+// URL starts at policy 1, and stops the chain at the first document it rejects.
 func Adopt(ctx context.Context, st Store, root Maintainers, self string, b Bundle, now time.Time) (State, bool, error) {
 	s, err := st.PolicyState(ctx)
 	if err != nil {
@@ -494,8 +495,13 @@ func Adopt(ctx context.Context, st Store, root Maintainers, self string, b Bundl
 	}
 	changed := false
 	var errs []error
+	var stale error
 	for _, d := range b.Chain {
 		p, err := s.Accept(root, d, now)
+		if errors.Is(err, ErrNotNewer) {
+			stale = err
+			continue
+		}
 		if err != nil {
 			errs = append(errs, err)
 			break
@@ -505,8 +511,8 @@ func Adopt(ctx context.Context, st Store, root Maintainers, self string, b Bundl
 			return s, changed, err
 		}
 		if !ok {
-			errs = append(errs, fmt.Errorf("policy %d: %w", p.Serial, ErrNotNewer))
-			break
+			stale = fmt.Errorf("policy %d: %w", p.Serial, ErrNotNewer)
+			continue
 		}
 		changed = true
 		s.Latest = &p
@@ -529,6 +535,9 @@ func Adopt(ctx context.Context, st Store, root Maintainers, self string, b Bundl
 			changed = true
 			s.Pause = &p
 		}
+	}
+	if !changed && stale != nil {
+		errs = append(errs, stale)
 	}
 	return s, changed, errors.Join(errs...)
 }
