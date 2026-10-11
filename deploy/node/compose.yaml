@@ -6,7 +6,7 @@
 # then: docker compose --profile sweep up -d
 
 x-boidscan: &boidscan
-  image: ghcr.io/boidscan/boidscan:0.0.3
+  image: ghcr.io/boidscan/boidscan:0.0.4
   volumes: ["key:/keys"]
   environment: &boidscan-env
     BOIDSCAN_DB: postgres://boidscan:boidscan@db/boidscan?sslmode=disable
