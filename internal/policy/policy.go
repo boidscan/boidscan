@@ -26,8 +26,14 @@ func (id Identity) Validate() error {
 	if !strings.HasPrefix(id.ProjectURL, "http://") && !strings.HasPrefix(id.ProjectURL, "https://") {
 		return errors.New("project URL must be an http(s) URL so scanned hosts can find out who is scanning them")
 	}
-	if strings.TrimSpace(id.AbuseContact) == "" {
+	contact := strings.ToLower(strings.TrimSpace(id.AbuseContact))
+	if contact == "" {
 		return errors.New("an abuse contact is required")
+	}
+	for _, d := range []string{"example.com", "example.net", "example.org"} {
+		if strings.HasSuffix(contact, "@"+d) || strings.HasSuffix(contact, "."+d) {
+			return fmt.Errorf("abuse contact %s is a placeholder; set your own", id.AbuseContact)
+		}
 	}
 	return nil
 }

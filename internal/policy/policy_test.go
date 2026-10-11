@@ -33,6 +33,8 @@ func TestIdentityRequired(t *testing.T) {
 		{},
 		{ProjectURL: "boidscan.example", AbuseContact: "x"},
 		{ProjectURL: "https://boidscan.example"},
+		{ProjectURL: "https://boidscan.example", AbuseContact: "you@example.org"},
+		{ProjectURL: "https://boidscan.example", AbuseContact: "Abuse@Mail.Example.COM"},
 	} {
 		if _, err := New(bad, 0, false); err == nil {
 			t.Errorf("identity %+v must be rejected", bad)
