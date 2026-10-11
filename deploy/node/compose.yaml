@@ -1,17 +1,24 @@
 # A single boidscan node: Postgres, the web page with search on http://localhost:8080 and the scanner.
-# Put BOIDSCAN_ABUSE_CONTACT=you@example.org in a .env file next to this one, then:
+# Put BOIDSCAN_ABUSE_CONTACT=<your email address> in a .env file next to this one, then:
 #   docker compose up -d
 #   docker compose run --rm scan 203.0.113.5
+# To take part in a flock, also set BOIDSCAN_ENDPOINT=http://<public IPv4> and BOIDSCAN_PORT=80,
+# then: docker compose --profile sweep up -d
 
 x-boidscan: &boidscan
-  image: ghcr.io/boidscan/boidscan:0.0.2
+  image: ghcr.io/boidscan/boidscan:0.0.3
+  volumes: ["key:/keys"]
   environment: &boidscan-env
     BOIDSCAN_DB: postgres://boidscan:boidscan@db/boidscan?sslmode=disable
-    BOIDSCAN_ABUSE_CONTACT: ${BOIDSCAN_ABUSE_CONTACT:?put BOIDSCAN_ABUSE_CONTACT=you@example.org in a .env file next to compose.yaml}
-    BOIDSCAN_NODE_ID: ${BOIDSCAN_NODE_ID:-my-node}
+    BOIDSCAN_KEY_FILE: /keys/node.key
+    BOIDSCAN_ABUSE_CONTACT: ${BOIDSCAN_ABUSE_CONTACT:?put BOIDSCAN_ABUSE_CONTACT=<your email address> in a .env file next to compose.yaml}
+    BOIDSCAN_NODE_NAME: ${BOIDSCAN_NODE_NAME:-my-node}
+    BOIDSCAN_ENDPOINT: ${BOIDSCAN_ENDPOINT:-}
+    BOIDSCAN_SEEDS: ${BOIDSCAN_SEEDS:-}
 
 volumes:
   db:
+  key:
 
 services:
   db:
@@ -37,7 +44,7 @@ services:
   serve:
     <<: *boidscan
     command: serve
-    ports: ["8080:80"]
+    ports: ["${BOIDSCAN_PORT:-8080}:80"]
     restart: unless-stopped
     depends_on:
       migrate:
@@ -56,3 +63,17 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+
+  worker:
+    <<: *boidscan
+    profiles: [sweep]
+    network_mode: host
+    command: worker
+    cap_add: [NET_RAW, NET_ADMIN]
+    restart: unless-stopped
+    environment:
+      <<: *boidscan-env
+      BOIDSCAN_DB: postgres://boidscan:boidscan@127.0.0.1:5432/boidscan?sslmode=disable
+    depends_on:
+      serve:
+        condition: service_started

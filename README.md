@@ -50,6 +50,8 @@ You need [Docker](https://docs.docker.com/get-started/get-docker/) and an addres
    echo "BOIDSCAN_ABUSE_CONTACT=you@example.org" > .env
    ```
 
+   Use your own address: boidscan refuses to start with one at example.org.
+
 3. Start the database and the web page:
 
    ```sh
