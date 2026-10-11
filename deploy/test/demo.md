@@ -4,7 +4,7 @@ Five boids on public servers formed a flock, received a signed policy, swept the
 
 ## Setup
 
-- Code: v0.0.3 without its last commit, which refuses placeholder abuse contacts and was written after this run. Image `boidscan:test`, built for arm64 with `docker buildx`.
+- Code: v0.0.3 up to commit 90ab65b (`-test-range`). The later commits of v0.0.3, among them the one refusing placeholder abuse contacts, were written after this run. Image `boidscan:test`, built for arm64 with `docker buildx`.
 - Five arm64 servers with Ubuntu 26.04, prepared with [cloud-init.yaml](cloud-init.yaml): Docker, Postgres and the boid's `serve` and `worker`, all on the host network.
 - Boids: boid-a to boid-e, one per server. boid-a is the seed (`BOIDSCAN_SEEDS`).
 - A test maintainer key (threshold 1), passed to every boid as `-policy-root`, so this flock cannot take the real flock's policy and the real flock cannot take this one's.
@@ -62,4 +62,4 @@ Nobody had low reach and nobody was shunned. b and c were slow to gain trust bec
 
 ## Reproducing
 
-Fill in `flock.env` in [cloud-init.yaml](cloud-init.yaml) and create the servers with it. Load the image on each server (`docker save boidscan:test | ssh root@<ip> docker load`) and run `docker compose up -d` in `/opt/boidscan`. Then sign a policy for the same range with `boidscan policy new -test-range ... -policy-root ...` and `policy sign`, and install it on one boid with `boidscan policy install`.
+See [demo-instructions.md](demo-instructions.md).
