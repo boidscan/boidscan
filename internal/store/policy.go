@@ -142,7 +142,8 @@ func (s *Store) SyncRevoked(ctx context.Context, ids []string, self string) erro
 	for _, q := range []string{
 		`UPDATE peers SET state = 'revoked' WHERE id = ANY($1)`,
 		`UPDATE peers SET state = 'new', verified_at = NULL WHERE state = 'revoked' AND NOT id = ANY($1)`,
-		`DELETE FROM observations WHERE node_id = ANY($1) AND node_id <> $2`,
+		`DELETE FROM observations o WHERE node_id = ANY($1) AND node_id <> $2 AND NOT EXISTS
+		     (SELECT 1 FROM samples s WHERE s.subject = o.signature AND s.verdict IN ('pass', 'change'))`,
 		`DELETE FROM coverage WHERE node_id = ANY($1) AND node_id <> $2`,
 		`DELETE FROM leases WHERE holder = ANY($1)`,
 	} {

@@ -114,7 +114,8 @@ func (s *Sweeper) Step(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	v := NewView(self, peers, s.cfg.Catalog, func(p Peer) bool { return cooperates(p, s.hash, s.cfg.RootID, st, now) })
+	coop := func(p Peer) bool { return cooperates(p, s.hash, s.cfg.RootID, st, now) }
+	v := NewView(self, peers, s.cfg.Catalog, homeEligible(peers, s.cfg.Catalog.Replicas, coop))
 	status, err := s.store.UnitStatus(ctx)
 	if err != nil {
 		return false, err

@@ -69,13 +69,14 @@ func Default() Catalog {
 	}
 }
 
-// Lab covers a small private range in /30 blocks held by two boids, so a
-// three-boid lab has blocks that some boid does not hold.
+// Lab covers a small private range in /30 blocks held by three boids, so a
+// five-boid lab has blocks that some boids do not hold, and every result has
+// two homes besides its scanner to check it.
 func Lab(universe netip.Prefix) (Catalog, error) {
 	c := Catalog{
 		Name:      "lab",
 		BlockBits: 30,
-		Replicas:  2,
+		Replicas:  3,
 		Universe:  []netip.Prefix{universe.Masked()},
 		Groups:    [][]uint16{{22, 80, 443, 6379}, {2200, 9443}},
 	}

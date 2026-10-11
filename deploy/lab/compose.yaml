@@ -1,5 +1,6 @@
-# Isolated lab: three boids that find each other through a DNS seed, their
-# workers, and targets. Nothing outside this network is scanned.
+# Isolated lab: five boids that find each other through a DNS seed, their
+# workers, and targets. Nothing outside this network is scanned. boid-d is
+# blocked by the targets' firewalls; boid-e forges results (BOIDSCAN_FORGE).
 #   ./flock.sh            start the flock and watch it
 #   ./flock.sh sweep      start the flock and its workers and watch the sweep
 #   ./e2e.sh              scan the targets and check results and the flock
@@ -49,6 +50,8 @@ volumes:
   key-a:
   key-b:
   key-c:
+  key-d:
+  key-e:
 
 services:
   db:
@@ -113,6 +116,37 @@ services:
         ipv4_address: 172.30.0.6
         aliases: [seeds.boidscan.lab]
 
+  boid-d:
+    <<: *boid
+    environment: &boid-d-env
+      <<: *boid-env
+      BOIDSCAN_DB: postgres://boidscan:boidscan@db/boid_d?sslmode=disable
+      BOIDSCAN_NODE_NAME: boid-d
+      BOIDSCAN_ENDPOINT: http://172.30.0.7
+      BOIDSCAN_DEBUG_LOG: /logs/boid-d.jsonl
+    volumes: ["./logs:/logs", "key-d:/keys"]
+    ports: ["8083:80"]
+    networks:
+      lab:
+        ipv4_address: 172.30.0.7
+        aliases: [seeds.boidscan.lab]
+
+  boid-e:
+    <<: *boid
+    environment: &boid-e-env
+      <<: *boid-env
+      BOIDSCAN_DB: postgres://boidscan:boidscan@db/boid_e?sslmode=disable
+      BOIDSCAN_NODE_NAME: boid-e
+      BOIDSCAN_ENDPOINT: http://172.30.0.8
+      BOIDSCAN_DEBUG_LOG: /logs/boid-e.jsonl
+      BOIDSCAN_FORGE: "true"
+    volumes: ["./logs:/logs", "key-e:/keys"]
+    ports: ["8084:80"]
+    networks:
+      lab:
+        ipv4_address: 172.30.0.8
+        aliases: [seeds.boidscan.lab]
+
   worker-a:
     <<: *worker
     network_mode: service:boid-a
@@ -146,6 +180,28 @@ services:
       boid-c:
         condition: service_healthy
 
+  worker-d:
+    <<: *worker
+    network_mode: service:boid-d
+    environment:
+      <<: *boid-d-env
+      BOIDSCAN_DEBUG_LOG: /logs/worker-d.jsonl
+    volumes: ["./logs:/logs", "key-d:/keys"]
+    depends_on:
+      boid-d:
+        condition: service_healthy
+
+  worker-e:
+    <<: *worker
+    network_mode: service:boid-e
+    environment:
+      <<: *boid-e-env
+      BOIDSCAN_DEBUG_LOG: /logs/worker-e.jsonl
+    volumes: ["./logs:/logs", "key-e:/keys"]
+    depends_on:
+      boid-e:
+        condition: service_healthy
+
   # A manual scan on behalf of boid-a, or of the boid in SCAN_BOID (a, b or c):
   # same database and key, so its results are signed by that boid.
   scan:
@@ -171,8 +227,19 @@ services:
     command: sh -c "apk add --no-cache openssl >/dev/null && [ -f /certs/cert.pem ] || openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj /CN=web.lab.test -addext subjectAltName=DNS:web.lab.test,DNS:www.lab.test -keyout /certs/key.pem -out /certs/cert.pem"
     volumes: ["certs:/certs"]
 
+  # One web server in every /30 block, so every unit has results to check;
+  # it drops boid-d, as a host that blocks one scanner would.
   web:
     image: nginx:1.29.1-alpine
+    command:
+      - sh
+      - -c
+      - |
+        apk add --no-cache iptables >/dev/null
+        iptables -A INPUT -s 172.30.0.7 -j DROP
+        for i in 14 18 22 26 30 34 38 42 46 50 54 58 62; do ip addr add 172.30.0.$$i/24 dev eth0; done
+        exec nginx -g 'daemon off;'
+    cap_add: [NET_ADMIN]
     volumes:
       - certs:/certs:ro
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
@@ -185,7 +252,8 @@ services:
 
   sshd:
     image: alpine:3.22.1
-    command: sh -c "apk add --no-cache openssh >/dev/null && ssh-keygen -A && exec /usr/sbin/sshd -D -e -p 22 -p 2200"
+    command: sh -c "apk add --no-cache openssh iptables >/dev/null && iptables -A INPUT -s 172.30.0.7 -j DROP && ssh-keygen -A && exec /usr/sbin/sshd -D -e -p 22 -p 2200"
+    cap_add: [NET_ADMIN]
     healthcheck:
       test: ["CMD", "nc", "-z", "127.0.0.1", "22"]
       interval: 2s

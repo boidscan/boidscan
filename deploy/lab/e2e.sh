@@ -1,6 +1,7 @@
 #!/bin/sh
-# Forms the lab flock, scans the isolated lab network, sweeps it with a worker
-# per boid under signed flock policies and checks the results through the public API.
+# Forms the lab flock, scans the isolated lab network, sweeps it under signed
+# flock policies, checks that boids judge a blocked and a forging boid, and
+# checks the results through the public API.
 set -eu
 . "$(dirname "$0")/lib.sh"
 
@@ -29,7 +30,7 @@ reset_logs
 $compose --progress quiet build boid-a
 lab_root
 reset_policies
-$compose up -d --wait db boid-a boid-b boid-c web sshd redis
+$compose up -d --wait db boid-a boid-b boid-c boid-d boid-e web sshd redis
 
 check "flock formed through the DNS seed" wait_for 60 flock_formed
 case $(policy_halt boid-b) in
@@ -41,14 +42,17 @@ check "boid-a marks a stopped boid down" wait_for 60 sees boid-a boid-c down
 $compose start boid-c >/dev/null
 check "a restarted boid rejoins" wait_for 30 flock_formed
 scanners=$(curl -fsS "$(boid_url boid-b)/fed/v1/scanners" | tr '\n' ' ')
-check "scanner list names every boid ($scanners)" test "$scanners" = "172.30.0.3 172.30.0.5 172.30.0.6 "
+check "scanner list names every boid ($scanners)" test "$scanners" = "172.30.0.3 172.30.0.5 172.30.0.6 172.30.0.7 172.30.0.8 "
 
-# Two of the three boids hold each block. One home scans, the third boid answers from the homes.
+# Three of the five boids hold each block. One home scans, a boid that is not a home answers from the homes.
 ip=172.30.0.11
 homes=$(homes_of $ip | tr '\n' ' ')
-scanner=${homes%% *}
-other=$(echo "$homes" | cut -d' ' -f2)
-for b in boid-a boid-b boid-c; do
+scanner= other= viewer=
+for b in $homes; do
+	# The target's firewall drops boid-d.
+	if [ -z "$scanner" ] && [ "$b" != boid-d ]; then scanner=$b; elif [ -z "$other" ]; then other=$b; fi
+done
+for b in $boids; do
 	case " $homes" in *" $b "*) ;; *) viewer=$b ;; esac
 done
 echo "     $ip is held by $homes; $scanner scans it, $viewer is not a home"
@@ -123,7 +127,8 @@ swept() { test "$(units_scanned | wc -l)" -eq $units; }
 check "the sweep covers all $units units of 172.30.0.0/26" wait_for 240 swept
 total=$(sweep_runs boid-a boid-b boid-c | wc -l)
 distinct=$(sweep_runs boid-a boid-b boid-c | sort -u | wc -l)
-check "no unit was scanned twice ($total runs, $distinct units)" test "$total" -eq "$distinct" -a "$total" -ge "$units"
+# Homes move while the boids come to trust each other, so a unit may be scanned twice.
+check "units are scanned once, apart from a few during trust changes ($total runs, $distinct units)" test "$distinct" -eq "$units" -a "$((total - distinct))" -le 4
 for b in boid-a boid-b boid-c; do
 	n=$(sweep_runs "$b" | wc -l)
 	check "$b's worker took part ($n units)" test "$n" -gt 0
@@ -144,22 +149,68 @@ case $out in
 *) fail "tampered policy: $out" ;;
 esac
 
-c_id=$(curl -fsS "$(boid_url boid-c)/fed/v1/node" | yq -p json '.record.id')
-by_c() { for b in boid-a boid-b; do curl -fsS "$(boid_url "$b")/fed/v1/units" | yq -p json ".[] | select(.scanned_by == \"$c_id\") | .block"; done | wc -l; }
-before=$(by_c)
-check "boid-c's coverage is held by the others ($before units)" test "$before" -gt 0
-check "policy 3 revokes boid-c" install_policy boid-a "$(sign_policy ".policy.revoked_nodes = [{\"id\": \"$c_id\", \"reason\": \"e2e\"}]")"
-check "policy 3 reached every boid, boid-c too" wait_for 30 all_hold 3
-check "boid-a marks boid-c revoked" wait_for 10 sees boid-a boid-c revoked
-revoked=$(curl -fsS "$api/fed/v1/revoked" | tr '\n' ' ')
-check "boid-c is on the revoked list ($revoked)" test "$revoked" = "172.30.0.6 "
-check "the others dropped boid-c's coverage" test "$(by_c)" -eq 0
-check "boid-c's worker stops" wait_for 30 sh -c "$compose logs worker-c | grep -q 'sweep halted: flock policy 3 revokes this boid'"
+trusts() { test "$(judges "$1" "$2")" = "trusted false"; }
+honest_trust() {
+	for v in boid-a boid-b boid-c; do
+		for p in boid-a boid-b boid-c; do
+			[ "$v" = "$p" ] || trusts "$v" "$p" || return 1
+		done
+	done
+}
+check "boid-a, boid-b and boid-c trust each other after checking samples" wait_for 120 honest_trust
 
-check "policy 4 expires after 20s" install_policy boid-a "$(sign_policy . -for 20s)"
-check "policy 4 reached boid-b" wait_for 30 sh -c 'test "$(curl -fsS http://localhost:8081/fed/v1/policy/status | yq -p json .serial)" = 4'
-expired() { case $(policy_halt "$1") in *"policy 4 expired"*) ;; *) return 1 ;; esac; }
-check "boid-b stops granting leases once policy 4 expires" wait_for 40 expired boid-b
-check "boid-a's worker stops" wait_for 20 halted "flock policy 4 expired"
+# From here on one worker sweeps at a time, so it covers every unit itself.
+$compose stop worker-a worker-b worker-c >/dev/null
+check "policy 3 lets each unit be scanned every 10s" install_policy boid-a "$(sign_policy '.policy.min_rescan = "10s"')"
+check "policy 3 reached every boid" wait_for 30 all_hold 3
+
+$compose --profile sweep up -d worker-d
+low_reach() {
+	for v in boid-a boid-b boid-c; do
+		case $(judges "$v" boid-d) in *shunned*) return 1 ;; *" true") ;; *) return 1 ;; esac
+	done
+}
+check "the targets' firewalls drop boid-d: it loses reach, not trust" wait_for 240 low_reach
+$compose stop worker-d >/dev/null
+
+$compose --profile sweep up -d worker-e
+shunned() {
+	for v in boid-a boid-b boid-c boid-d; do
+		case $(judges "$v" boid-e) in shunned*) ;; *) return 1 ;; esac
+	done
+}
+check "boid-e forges results: every other boid shuns it" wait_for 240 shunned
+$compose stop worker-e >/dev/null
+e_id=$(curl -fsS "$(boid_url boid-e)/fed/v1/node" | yq -p json '.record.id')
+# Results of boid-e that checks confirmed stay; its forged certificates and
+# services nobody else found must be gone.
+forged_by_e() {
+	curl -fsS "$(boid_url "$1")/api/v1/search?cidr=172.30.0.0/24&limit=1000" | yq -p json "
+		.results as \$r |
+		[\$r[] | select(.node_id == \"$e_id\" and .cert_sha256 != null)] +
+		([\$r[] | select(.node_id == \"$e_id\") | .ip + \":\" + (.port | tostring)] -
+		 [\$r[] | select(.node_id != \"$e_id\") | .ip + \":\" + (.port | tostring)]) | length"
+}
+for b in boid-a boid-b boid-c boid-d; do
+	check "$b holds no forged result of boid-e" test "$(forged_by_e "$b")" = 0
+done
+e_home=0
+for i in $(seq 1 4 61); do
+	homes_of 172.30.0.$i | grep -q boid-e && e_home=$((e_home + 1))
+done
+check "boid-e holds no block for boid-a" test "$e_home" = 0
+
+check "policy 4 revokes boid-e" install_policy boid-a "$(sign_policy ".policy.revoked_nodes = [{\"id\": \"$e_id\", \"reason\": \"forged results in the e2e test\"}]")"
+check "policy 4 reached every boid, boid-e too" wait_for 30 all_hold 4
+check "boid-a marks boid-e revoked" wait_for 10 sees boid-a boid-e revoked
+revoked=$(curl -fsS "$api/fed/v1/revoked" | tr '\n' ' ')
+check "boid-e is on the revoked list ($revoked)" test "$revoked" = "172.30.0.8 "
+
+$compose --profile sweep up -d worker-a
+check "policy 5 expires after 20s" install_policy boid-a "$(sign_policy . -for 20s)"
+check "policy 5 reached boid-b" wait_for 30 sh -c 'test "$(curl -fsS http://localhost:8081/fed/v1/policy/status | yq -p json .serial)" = 5'
+expired() { case $(policy_halt "$1") in *"policy 5 expired"*) ;; *) return 1 ;; esac; }
+check "boid-b stops granting leases once policy 5 expires" wait_for 40 expired boid-b
+check "boid-a's worker stops" wait_for 30 halted "flock policy 5 expired"
 
 echo "e2e passed"

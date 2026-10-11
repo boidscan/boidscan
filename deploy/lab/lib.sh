@@ -9,6 +9,8 @@ boid_url() {
 	boid-a) echo "$api" ;;
 	boid-b) echo http://localhost:8081 ;;
 	boid-c) echo http://localhost:8082 ;;
+	boid-d) echo http://localhost:8083 ;;
+	boid-e) echo http://localhost:8084 ;;
 	esac
 }
 
@@ -32,9 +34,18 @@ wait_for() {
 
 sees() { test "$(peer_state "$1" "$2")" = "$3"; }
 
+boids="boid-a boid-b boid-c boid-d boid-e"
+
+# judges VIEWER PEER prints VIEWER's trust in PEER and whether it has low
+# reach, e.g. "trusted false".
+judges() {
+	curl -fsS "$(boid_url "$1")/fed/v1/peers" 2>/dev/null |
+		yq -p json ".peers[] | select(.name == \"$2\") | .trust + \" \" + (.low_reach | tostring)" 2>/dev/null
+}
+
 flock_formed() {
-	for v in boid-a boid-b boid-c; do
-		for p in boid-a boid-b boid-c; do
+	for v in $boids; do
+		for p in $boids; do
 			[ "$v" = "$p" ] || sees "$v" "$p" alive || return 1
 		done
 	done
@@ -124,7 +135,7 @@ policy_halt() { curl -fsS "$(boid_url "$1")/fed/v1/policy/status" | yq -p json '
 
 # all_hold SERIAL succeeds once every boid holds that policy.
 all_hold() {
-	for b in boid-a boid-b boid-c; do
+	for b in $boids; do
 		test "$(policy_serial "$b")" = "$1" || return 1
 	done
 }

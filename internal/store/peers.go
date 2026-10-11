@@ -31,7 +31,7 @@ func (s *Store) SavePeer(ctx context.Context, r fed.Record) (saved, isNew bool, 
 
 func (s *Store) Peers(ctx context.Context) ([]fed.Peer, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, name, endpoint, contact, project_url, version, catalog, root, policy_serial, emergency_pause, record_time, signature, first_seen, verified_at IS NOT NULL, state
+		`SELECT id, name, endpoint, contact, project_url, version, catalog, root, policy_serial, emergency_pause, record_time, signature, first_seen, verified_at IS NOT NULL, state, trust, low_reach
 		 FROM peers ORDER BY name, id`)
 	if err != nil {
 		return nil, err
@@ -41,7 +41,7 @@ func (s *Store) Peers(ctx context.Context) ([]fed.Peer, error) {
 	for rows.Next() {
 		var p fed.Peer
 		var serial int64
-		if err := rows.Scan(&p.ID, &p.Name, &p.Endpoint, &p.Contact, &p.ProjectURL, &p.Version, &p.Catalog, &p.Root, &serial, &p.EmergencyPause, &p.Time, &p.Signature, &p.FirstSeen, &p.Verified, &p.State); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Endpoint, &p.Contact, &p.ProjectURL, &p.Version, &p.Catalog, &p.Root, &serial, &p.EmergencyPause, &p.Time, &p.Signature, &p.FirstSeen, &p.Verified, &p.State, &p.Trust, &p.LowReach); err != nil {
 			return nil, err
 		}
 		p.PolicySerial = uint64(serial)

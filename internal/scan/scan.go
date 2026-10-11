@@ -32,6 +32,8 @@ type Job struct {
 	Ports   []uint16
 	// Unit is set for sweep scans.
 	Unit *catalog.Unit
+	// Forge stores false results, for testing how other boids catch them.
+	Forge bool
 }
 
 type Result struct {
@@ -86,14 +88,20 @@ func Run(ctx context.Context, st *store.Store, key fed.Signer, pol *policy.Polic
 		if storeErr != nil {
 			continue
 		}
-		if err := st.AddObservation(ctx, res.RunID, key, o); err != nil {
-			storeErr = err
-			cancel()
-			continue
+		stored := []grab.Observation{o}
+		if job.Forge {
+			stored = forge(o)
 		}
-		res.Stored++
-		if o.Status == "success" {
-			res.Success++
+		for _, o := range stored {
+			if err := st.AddObservation(ctx, res.RunID, key, o); err != nil {
+				storeErr = err
+				cancel()
+				break
+			}
+			res.Stored++
+			if o.Status == "success" {
+				res.Success++
+			}
 		}
 	}
 	// If zgrab2 stopped early, zmap is still writing hits; stop it and unblock it.

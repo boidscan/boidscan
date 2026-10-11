@@ -91,7 +91,7 @@ func (m *memStore) SyncRevoked(_ context.Context, ids []string, self string) err
 	gone := func(id string) bool { return id != self && slices.Contains(ids, id) }
 	m.data.mu.Lock()
 	defer m.data.mu.Unlock()
-	m.data.obs = slices.DeleteFunc(m.data.obs, func(o client.Observation) bool { return gone(o.NodeID) })
+	m.data.obs = slices.DeleteFunc(m.data.obs, func(o client.Observation) bool { return gone(o.NodeID) && !m.data.confirmed(o) })
 	m.data.cov = slices.DeleteFunc(m.data.cov, func(c Coverage) bool { return gone(c.NodeID) })
 	return nil
 }

@@ -267,6 +267,7 @@ type flockFlags struct {
 	endpoint string
 	lab      bool
 	labRange string
+	forge    bool
 	rootFlag
 }
 
@@ -276,6 +277,7 @@ func (f *flockFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.endpoint, "endpoint", env("ENDPOINT", ""), "http://<public IPv4> where other boids reach this node; empty disables federation")
 	fs.BoolVar(&f.lab, "lab", env("LAB", "") == "true", "lab flock: RFC 1918 endpoints and targets, and the lab catalog")
 	fs.StringVar(&f.labRange, "lab-range", env("LAB_RANGE", ""), "the range a lab flock sweeps, e.g. 172.30.0.0/26")
+	fs.BoolVar(&f.forge, "forge", env("FORGE", "") == "true", "lab only: report false results and defend them, to test how other boids catch it")
 	f.rootFlag.register(fs)
 }
 
@@ -298,6 +300,9 @@ func (f *rootFlag) maintainers() (flockpolicy.Maintainers, error) {
 }
 
 func (f *flockFlags) catalog() (catalog.Catalog, error) {
+	if f.forge && !f.lab {
+		return catalog.Catalog{}, errors.New("-forge only works with -lab")
+	}
 	if !f.lab {
 		return catalog.Default(), nil
 	}
@@ -362,7 +367,7 @@ func cmdWorker(ctx context.Context, args []string) error {
 			if err != nil {
 				return err
 			}
-			_, err = scan.Run(ctx, st, key, pol, sf.tools, scan.Job{Targets: []netip.Prefix{u.Block}, Ports: cat.Ports(u.Group), Unit: &u})
+			_, err = scan.Run(ctx, st, key, pol, sf.tools, scan.Job{Targets: []netip.Prefix{u.Block}, Ports: cat.Ports(u.Group), Unit: &u, Forge: ff.forge})
 			return err
 		},
 	}, st)
@@ -381,6 +386,7 @@ func cmdServe(ctx context.Context, args []string) error {
 	seeds := fs.String("seeds", env("SEEDS", ""), "comma-separated boid URLs or DNS names whose A records are boids")
 	interval := fs.Duration("gossip-interval", envDuration("GOSSIP_INTERVAL", 30*time.Second), "time between gossip rounds")
 	leaseTTL := fs.Duration("lease-ttl", envDuration("LEASE_TTL", 10*time.Minute), "how long a lease this node grants lasts without renewal")
+	zgrab2 := fs.String("zgrab2", env("ZGRAB2", "zgrab2"), "zgrab2 binary, for checking other boids' results")
 	policyURL := fs.String("policy-url", env("POLICY_URL", "https://boidscan.network/policy.json"), "checked hourly for a newer flock policy; empty disables it")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -395,6 +401,10 @@ func cmdServe(ctx context.Context, args []string) error {
 	root, err := ff.maintainers()
 	if err != nil {
 		return err
+	}
+	trust := fed.DefaultTrust()
+	if ff.lab {
+		trust = fed.LabTrust()
 	}
 	if ff.root != "" {
 		slog.Warn("using the maintainer keys from -policy-root instead of the built-in ones: this boid only joins a flock with the same keys", "root", root.String())
@@ -428,6 +438,19 @@ func cmdServe(ctx context.Context, args []string) error {
 			Catalog:      cat,
 			Data:         st,
 			LeaseTTL:     *leaseTTL,
+			Trust:        trust,
+			Forge:        ff.forge,
+			Check: func(ctx context.Context, targets []fed.CheckTarget) ([]fed.CheckResult, error) {
+				exclusions, err := st.ExclusionSet(ctx)
+				if err != nil {
+					return nil, err
+				}
+				pol, err := policy.New(c.id, 0, ff.lab, exclusions)
+				if err != nil {
+					return nil, err
+				}
+				return scan.Check(ctx, pol, scan.Tools{ZGrab2: *zgrab2}, targets)
+			},
 		}, st)
 		if err != nil {
 			return err

@@ -69,6 +69,8 @@ A removal starts as a public issue with evidence. The operator gets 7 days to re
 
 Removed boids keep their entry in a public list, so that people can still block them in their firewalls.
 
+Boids also check each other's results without waiting for a decision. A boid whose results others keep contradicting is dropped by each boid that sees it, and a boid that misses much of what others find gets no more work. Removal by policy is for what checks cannot see, such as unanswered abuse reports.
+
 ## Reporting abuse
 
 Every boid names an abuse contact in its scans and on its info page. Write to that contact first. If the operator does not answer, or you think the flock itself is misused, open an issue in `boidscan/flock-policy`.

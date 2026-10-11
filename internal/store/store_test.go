@@ -28,7 +28,7 @@ func openTestStore(t *testing.T) *Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(st.Close)
-	_, err = st.pool.Exec(ctx, `DROP TABLE IF EXISTS observations, scan_runs, optouts, exclusions, peers, coverage, leases, replicas, policies, policy_pauses, schema_migrations CASCADE`)
+	_, err = st.pool.Exec(ctx, `DROP TABLE IF EXISTS observations, scan_runs, optouts, exclusions, peers, coverage, leases, replicas, policies, policy_pauses, samples, sample_votes, checks, schema_migrations CASCADE`)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -59,6 +59,12 @@ func ObservationMessage(ip string, port int, name, protocol, status string, seen
 	return Message("boidscan-observation-v1", ip, strconv.Itoa(port), name, protocol, status, Time(seenAt), hex.EncodeToString(sum[:]))
 }
 
+// RequestMessage authenticates an HTTP request between boids.
+func RequestMessage(method, path string, at time.Time, body []byte) []byte {
+	sum := sha256.Sum256(body)
+	return Message("boidscan-request-v1", method, path, Time(at), hex.EncodeToString(sum[:]))
+}
+
 // JSONMessage signs a JSON document by the hash of its canonical form, so it
 // survives being relayed with different whitespace.
 func JSONMessage(tag string, raw []byte) []byte {

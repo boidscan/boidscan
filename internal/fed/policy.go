@@ -49,7 +49,7 @@ func (n *Node) cooperates(st flockpolicy.State, now time.Time) func(Peer) bool {
 }
 
 func cooperates(p Peer, catalogHash, rootID string, st flockpolicy.State, now time.Time) bool {
-	return p.Verified && (p.State == StateAlive || p.State == StateSuspect) && p.Catalog == catalogHash && p.Root == rootID &&
+	return p.Verified && (p.State == StateAlive || p.State == StateSuspect) && p.Trust != TrustShunned && p.Catalog == catalogHash && p.Root == rootID &&
 		st.Trusts(p.ID, p.Version, p.PolicySerial, now)
 }
 

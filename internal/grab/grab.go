@@ -102,7 +102,9 @@ func KnownServices(userAgent string) []Service {
 // any port (http, falling back to HTTPS).
 func GenericServices(userAgent string) []Service {
 	return []Service{
-		{Name: "banner", Module: "banner", Generic: true},
+		// A client-first port such as TLS sends nothing and would hold the read
+		// for zgrab2's 60s default target timeout.
+		{Name: "banner", Module: "banner", Generic: true, Flags: map[string]string{"target-timeout": "5s"}},
 		{Name: "http", Module: "http", Generic: true, Flags: map[string]string{
 			"user-agent": userAgent, "raw-headers": "true", "retry-https": "true", "fail-http-to-https": "true",
 		}},

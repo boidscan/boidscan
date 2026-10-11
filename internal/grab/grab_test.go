@@ -10,7 +10,7 @@ func TestINI(t *testing.T) {
 	for _, want := range []string{
 		"[http]\ntrigger=\"https443\"\nname=\"https443\"\nport=443\nraw-headers=\"true\"\nuse-https=\"true\"\nuser-agent=\"boidscan/test\"\n",
 		"[ssh]\ntrigger=\"ssh22\"\nname=\"ssh22\"\nport=22\n",
-		"[banner]\ntrigger=\"banner\"\nname=\"banner\"\n\n",
+		"[banner]\ntrigger=\"banner\"\nname=\"banner\"\ntarget-timeout=\"5s\"\n\n",
 		"retry-https=\"true\"\n",
 	} {
 		if !strings.Contains(ini, want) {
@@ -104,5 +104,18 @@ func TestParseLineGeneric(t *testing.T) {
 	failed := `{"ip":"192.0.2.1","data":{"http":{"status":"unknown-error","protocol":"http","port":2200}}}`
 	if obs, err := ParseLine([]byte(failed), byName); err != nil || len(obs) != 0 {
 		t.Fatalf("failed generic result must be dropped, got %+v, %v", obs, err)
+	}
+}
+
+func TestFingerprint(t *testing.T) {
+	for raw, want := range map[string]string{
+		`{"result":{"response":{"request":{"tls_log":{"handshake_log":{"server_certificates":{"certificate":{"parsed":{"fingerprint_sha256":"AA11"}}}}}}}}}`: "aa11",
+		`{"result":{"key_exchange":{"server_host_key":{"fingerprint_sha256":"bb22"}}}}`:                                                                      "bb22",
+		`{"result":{"banner":"SSH-2.0-x"}}`: "",
+		`not json`:                          "",
+	} {
+		if got := Fingerprint([]byte(raw)); got != want {
+			t.Errorf("Fingerprint(%s) = %q, want %q", raw, got, want)
+		}
 	}
 }

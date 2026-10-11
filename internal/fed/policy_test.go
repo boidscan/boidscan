@@ -184,7 +184,7 @@ func TestRevocation(t *testing.T) {
 	if c.serial() != 2 || !c.data.has(ip) {
 		t.Fatal("the revoked boid must learn the policy and keep its own results")
 	}
-	if res := push(t, a, pushMsg{Observations: []client.Observation{fromC}}); res.Stored != 0 {
+	if res := push(t, b, a, pushMsg{Observations: []client.Observation{fromC}}); res.Stored != 0 {
 		t.Fatalf("push of a revoked boid's result: %+v", res)
 	}
 	if res := leaseReason(t, c, a, homeUnit(t, a)); res.Granted {

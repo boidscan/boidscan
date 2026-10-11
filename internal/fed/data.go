@@ -41,6 +41,8 @@ type Data interface {
 	// UnitStatus lists units with coverage or an unexpired lease.
 	UnitStatus(ctx context.Context) ([]UnitStatus, error)
 	SweepRuns(ctx context.Context, limit int) ([]Run, error)
+
+	TrustData
 }
 
 // Coverage says that NodeID scanned a unit, so "nothing open" is data too.
@@ -120,17 +122,57 @@ func (n *Node) selfMember() Member {
 	return Member{ID: n.cfg.Key.ID(), Name: n.cfg.Name, Endpoint: n.cfg.Endpoint}
 }
 
-// view also returns the policy state it was built with.
-func (n *Node) view(ctx context.Context) (View, flockpolicy.State, error) {
+// flock is a view plus what it was built from.
+type flock struct {
+	View
+	// all places blocks on every peer this boid cooperates with, as a boid
+	// that trusts nobody yet does.
+	all   View
+	state flockpolicy.State
+	peers map[string]Peer
+	coop  func(Peer) bool
+}
+
+// holds reports whether this boid takes results and grants leases for block.
+// Boids trust different peers, so their views differ: besides its own view,
+// a boid accepts the view of a boid that trusts nobody yet.
+func (f flock) holds(block netip.Prefix) bool {
+	return f.IsHome(block, f.self) || f.all.IsHome(block, f.self)
+}
+
+// cooperating reports whether id is a peer this boid works with in any role.
+func (f flock) cooperating(id string) bool {
+	p, ok := f.peers[id]
+	return ok && f.coop(p)
+}
+
+// mayLease reports whether id may scan for the flock: shunned peers and peers
+// that miss too much may not.
+func (f flock) mayLease(id string) bool {
+	return id == f.self || (f.cooperating(id) && !f.peers[id].LowReach)
+}
+
+// rejects reports whether results signed by id are refused.
+func (f flock) rejects(id string) bool {
+	return f.state.Latest.Revoked(id) || f.peers[id].Trust == TrustShunned
+}
+
+func (n *Node) view(ctx context.Context) (flock, error) {
 	st, err := n.store.PolicyState(ctx)
 	if err != nil {
-		return View{}, st, err
+		return flock{}, err
 	}
 	peers, err := n.store.Peers(ctx)
 	if err != nil {
-		return View{}, st, err
+		return flock{}, err
 	}
-	return NewView(n.selfMember(), peers, n.cfg.Catalog, n.cooperates(st, n.now())), st, nil
+	f := flock{state: st, peers: map[string]Peer{}, coop: n.cooperates(st, n.now())}
+	for _, p := range peers {
+		f.peers[p.ID] = p
+	}
+	f.View = NewView(n.selfMember(), peers, n.cfg.Catalog, homeEligible(peers, n.cfg.Catalog.Replicas, f.coop))
+	f.all = NewView(n.selfMember(), peers, n.cfg.Catalog, f.coop)
+	return f, nil
 }
 
 // replicateLoop pushes results to their homes, separately from gossip so a
@@ -151,13 +193,13 @@ func (n *Node) replicateLoop(ctx context.Context) {
 // Replicate pushes every stored row to the current homes of its block. Homes
 // that changed get the blocks they gained, from whichever boid holds them.
 func (n *Node) Replicate(ctx context.Context) {
-	v, _, err := n.view(ctx)
+	f, err := n.view(ctx)
 	if err != nil {
 		slog.Error("loading peers", "err", err)
 		return
 	}
-	for _, m := range v.Others() {
-		if err := n.pushTo(ctx, v, m); err != nil {
+	for _, m := range f.Others() {
+		if err := n.pushTo(ctx, f.View, m); err != nil {
 			slog.Error("replicating to "+m.Label(), "err", err)
 		}
 	}
@@ -213,7 +255,7 @@ func (n *Node) pushTo(ctx context.Context, v View, m Member) error {
 				return err
 			}
 			var res pushResult
-			if err := n.call(ctx, http.MethodPost, m.Endpoint+"/fed/v1/push", body, &res); err != nil {
+			if err := n.signedCall(ctx, http.MethodPost, m.Endpoint+"/fed/v1/push", body, &res); err != nil {
 				slog.Debug("push failed, will retry", "home", m.Label(), "err", err)
 				break
 			}
@@ -240,29 +282,44 @@ func (n *Node) pushTo(ctx context.Context, v View, m Member) error {
 	return n.cfg.Data.SaveReplicaState(ctx, m.ID, st)
 }
 
+// handlePush stores results for blocks this boid holds, or that a peer it
+// accepts as a home says it holds. Results of a peer it works with come from
+// anyone it works with; results of departed or unknown scanners only through
+// a peer it accepts as a home.
 func (n *Node) handlePush(w http.ResponseWriter, r *http.Request) {
+	body, sender, err := n.signedBody(w, r, maxPushBody)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	var msg pushMsg
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxPushBody)).Decode(&msg); err != nil {
+	if err := json.Unmarshal(body, &msg); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid push"})
 		return
 	}
 	ctx := r.Context()
-	v, st, err := n.view(ctx)
+	f, err := n.view(ctx)
 	if err != nil {
 		slog.Error("loading peers", "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	self := n.cfg.Key.ID()
+	if !f.cooperating(sender) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "this boid does not work with the sender"})
+		return
+	}
+	accepts := func(scanner string) bool {
+		return !f.rejects(scanner) && (f.cooperating(scanner) || f.Has(sender))
+	}
 	reserved := netset.Reserved(n.cfg.AllowPrivate)
 	var res pushResult
 	var obs []client.Observation
 	for _, o := range msg.Observations {
 		ip, err := netip.ParseAddr(o.IP)
 		switch {
-		case err != nil || !n.cfg.Catalog.Contains(ip) || reserved.Contains(ip) || o.SeenAt.After(n.now().Add(maxClockSkew)) || st.Latest.Revoked(o.NodeID):
+		case err != nil || !n.cfg.Catalog.Contains(ip) || reserved.Contains(ip) || o.SeenAt.After(n.now().Add(maxClockSkew)) || !accepts(o.NodeID):
 			res.Rejected++
-		case !v.IsHome(n.cfg.Catalog.Block(ip), self):
+		case !f.holds(n.cfg.Catalog.Block(ip)) && !f.Has(sender):
 			res.Retry = true
 		case o.Verify() != nil:
 			res.Rejected++
@@ -273,9 +330,9 @@ func (n *Node) handlePush(w http.ResponseWriter, r *http.Request) {
 	var cov []Coverage
 	for _, c := range msg.Coverage {
 		switch {
-		case c.Catalog != n.catalogHash || !n.cfg.Catalog.Valid(c.Unit()) || c.ScannedAt.After(n.now().Add(maxClockSkew)) || st.Latest.Revoked(c.NodeID):
+		case c.Catalog != n.catalogHash || !n.cfg.Catalog.Valid(c.Unit()) || c.ScannedAt.After(n.now().Add(maxClockSkew)) || !accepts(c.NodeID) || f.peers[c.NodeID].LowReach:
 			res.Rejected++
-		case !v.IsHome(c.Block, self):
+		case !f.holds(c.Block) && !f.Has(sender):
 			res.Retry = true
 		case !c.Verify():
 			res.Rejected++
@@ -295,10 +352,15 @@ func (n *Node) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res.Stored = stored
-	if res.Rejected > 0 {
-		slog.Warn("rejected pushed rows: bad signature, reserved address, wrong catalog or revoked scanner", "rejected", res.Rejected, "from", r.RemoteAddr)
+	from := sig.Short(sender)
+	if p, ok := f.peers[sender]; ok {
+		from = p.Label()
 	}
-	slog.Debug("push received", "from", r.RemoteAddr, "observations", len(msg.Observations), "coverage", len(msg.Coverage), "stored", stored, "retry", res.Retry)
+	if res.Rejected > 0 {
+		slog.Warn("rejected pushed rows: bad signature, reserved address, wrong catalog, or a scanner this boid does not accept", "rejected", res.Rejected, "from", from)
+	}
+	slog.Debug("push received", "from", from, "observations", len(msg.Observations), "coverage", len(msg.Coverage), "stored", stored, "retry", res.Retry)
+	n.sampleRows(ctx, f, obs, cov)
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -312,14 +374,14 @@ func (n *Node) Host(ctx context.Context, ip netip.Addr) (client.Host, error) {
 	if err != nil {
 		return h, err
 	}
-	v, _, err := n.view(ctx)
+	f, err := n.view(ctx)
 	if err != nil {
 		return h, err
 	}
 	var mu sync.Mutex
 	all := local.Services
 	var wg sync.WaitGroup
-	for _, m := range v.Homes(n.cfg.Catalog.Block(ip)) {
+	for _, m := range f.Homes(n.cfg.Catalog.Block(ip)) {
 		if m.ID == n.cfg.Key.ID() {
 			continue
 		}
@@ -332,7 +394,7 @@ func (n *Node) Host(ctx context.Context, ip netip.Addr) (client.Host, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			for _, o := range remote.Services {
-				if o.IP == ip.String() && o.Verify() == nil {
+				if o.IP == ip.String() && !f.rejects(o.NodeID) && o.Verify() == nil {
 					all = append(all, o)
 				}
 			}
@@ -409,18 +471,18 @@ func (n *Node) handleLease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	v, st, err := n.view(ctx)
+	f, err := n.view(ctx)
 	if err != nil {
 		slog.Error("loading peers", "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	halt := st.Halt(n.now(), n.cfg.Version, n.catalogHash, n.cfg.Key.ID())
+	halt := f.state.Halt(n.now(), n.cfg.Version, n.catalogHash, n.cfg.Key.ID())
 	switch {
-	case !v.Has(req.Holder):
-		writeJSON(w, http.StatusOK, leaseResponse{Reason: "unknown holder"})
+	case !f.mayLease(req.Holder):
+		writeJSON(w, http.StatusOK, leaseResponse{Reason: "this boid does not take scans from the holder"})
 		return
-	case !v.IsHome(req.Unit.Block, n.cfg.Key.ID()):
+	case !f.holds(req.Unit.Block):
 		writeJSON(w, http.StatusOK, leaseResponse{Reason: "this boid does not hold the block"})
 		return
 	case req.Release:
@@ -435,7 +497,7 @@ func (n *Node) handleLease(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, leaseResponse{Reason: halt})
 		return
 	}
-	ok, err := n.cfg.Data.AcquireLease(ctx, req.Unit, req.Holder, n.cfg.LeaseTTL, time.Duration(st.Latest.MinRescan))
+	ok, err := n.cfg.Data.AcquireLease(ctx, req.Unit, req.Holder, n.cfg.LeaseTTL, time.Duration(f.state.Latest.MinRescan))
 	if err != nil {
 		slog.Error("granting lease", "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
@@ -497,13 +559,13 @@ func (n *Node) handleDue(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	limit = min(max(limit, 1), 64)
 	ctx := r.Context()
-	v, st, err := n.view(ctx)
+	f, err := n.view(ctx)
 	if err != nil {
 		slog.Error("loading peers", "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	if st.Halt(n.now(), n.cfg.Version, n.catalogHash, n.cfg.Key.ID()) != "" {
+	if f.state.Halt(n.now(), n.cfg.Version, n.catalogHash, n.cfg.Key.ID()) != "" {
 		writeJSON(w, http.StatusOK, []catalog.Unit{})
 		return
 	}
@@ -513,14 +575,14 @@ func (n *Node) handleDue(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	units := dueUnits(n.cfg.Catalog, v, n.cfg.Key.ID(), status, netset.Reserved(n.cfg.AllowPrivate), time.Duration(st.Latest.MinRescan), n.now(), limit)
+	units := dueUnits(n.cfg.Catalog, f.View, n.cfg.Key.ID(), status, netset.Reserved(n.cfg.AllowPrivate), time.Duration(f.state.Latest.MinRescan), n.now(), limit)
 	writeJSON(w, http.StatusOK, units)
 }
 
 // handleUnits lists the units this boid holds that were scanned or are leased.
 func (n *Node) handleUnits(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	v, _, err := n.view(ctx)
+	f, err := n.view(ctx)
 	if err != nil {
 		slog.Error("loading peers", "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
@@ -534,7 +596,7 @@ func (n *Node) handleUnits(w http.ResponseWriter, r *http.Request) {
 	}
 	out := []UnitStatus{}
 	for _, s := range status {
-		if v.IsHome(s.Block, n.cfg.Key.ID()) {
+		if f.IsHome(s.Block, n.cfg.Key.ID()) {
 			out = append(out, s)
 		}
 	}
@@ -565,12 +627,12 @@ func (n *Node) handleHomes(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "want ?ip=<IPv4 address>"})
 		return
 	}
-	v, _, err := n.view(r.Context())
+	f, err := n.view(r.Context())
 	if err != nil {
 		slog.Error("loading peers", "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 	block := n.cfg.Catalog.Block(ip)
-	writeJSON(w, http.StatusOK, homesView{Block: block, Homes: v.Homes(block)})
+	writeJSON(w, http.StatusOK, homesView{Block: block, Homes: f.Homes(block)})
 }

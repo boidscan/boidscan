@@ -1,12 +1,10 @@
 package fed
 
 import (
-	"bytes"
 	"context"
 	crand "crypto/rand"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"math/rand/v2"
 	"net"
@@ -49,6 +47,9 @@ type Peer struct {
 	FirstSeen time.Time `json:"first_seen"`
 	Verified  bool      `json:"verified"`
 	State     string    `json:"state"`
+	// Trust and LowReach are this boid's own judgement of the peer.
+	Trust    string `json:"trust"`
+	LowReach bool   `json:"low_reach"`
 }
 
 type Store interface {
@@ -92,6 +93,14 @@ type Config struct {
 	// the boid only takes part in discovery.
 	Data     Data
 	LeaseTTL time.Duration
+
+	Trust TrustConfig
+	// Check grabs targets for samples and returns a result for each, in
+	// order. Without it this boid answers no check requests.
+	Check func(ctx context.Context, targets []CheckTarget) ([]CheckResult, error)
+	// Forge makes this boid defend its own false reports when asked to check
+	// them, for the lab.
+	Forge bool
 }
 
 type Node struct {
@@ -122,6 +131,9 @@ func New(cfg Config, st Store) (*Node, error) {
 	}
 	if cfg.LeaseTTL <= 0 {
 		cfg.LeaseTTL = 10 * time.Minute
+	}
+	if cfg.Trust.TrustAfter == 0 {
+		cfg.Trust = DefaultTrust()
 	}
 	n := &Node{
 		cfg:         cfg,
@@ -173,6 +185,7 @@ func (n *Node) Run(ctx context.Context) {
 		"catalog", n.cfg.Catalog.Name+" "+sig.Short(n.catalogHash), "root", sig.Short(n.rootID))
 	if n.cfg.Data != nil {
 		go n.replicateLoop(ctx)
+		go n.trustLoop(ctx)
 	}
 	t := time.NewTicker(n.cfg.Interval)
 	defer t.Stop()
@@ -340,22 +353,7 @@ func (n *Node) call(ctx context.Context, method, url string, body []byte, out an
 }
 
 func call(ctx context.Context, c *http.Client, method, url string, body []byte, out any) error {
-	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	res, err := c.Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s: %s", url, res.Status)
-	}
-	return json.NewDecoder(io.LimitReader(res.Body, maxPushBody)).Decode(out)
+	return callWith(ctx, c, method, url, body, nil, out)
 }
 
 func (n *Node) ingest(ctx context.Context, records []Record, via string) {
@@ -527,6 +525,8 @@ func (n *Node) Handler() http.Handler {
 		mux.HandleFunc("GET /fed/v1/units", n.handleUnits)
 		mux.HandleFunc("GET /fed/v1/runs", n.handleRuns)
 		mux.HandleFunc("GET /fed/v1/homes", n.handleHomes)
+		mux.HandleFunc("POST /fed/v1/check", n.handleCheck)
+		mux.HandleFunc("GET /fed/v1/check/{key}", n.handleCheckResult)
 	}
 	return mux
 }

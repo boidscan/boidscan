@@ -44,6 +44,13 @@ func TestPeers(t *testing.T) {
 		t.Fatalf("a moved endpoint must be verified again: %+v", p)
 	}
 
+	if err := st.SetTrust(ctx, rec.ID, fed.TrustShunned, true); err != nil {
+		t.Fatal(err)
+	}
+	if p := onlyPeer(t, st); p.Trust != fed.TrustShunned || !p.LowReach {
+		t.Fatalf("trust not stored: %+v", p)
+	}
+
 	if err := st.DeletePeer(ctx, rec.ID); err != nil {
 		t.Fatal(err)
 	}

@@ -103,7 +103,7 @@ The same data is available as JSON from `GET /api/v1/host/{ip}`. This is an HTTP
 
 ## Try it without scanning anything real
 
-The lab needs a copy of this repository (`git clone https://github.com/boidscan/boidscan`). It runs Postgres, three boids and three target containers on a private Docker network. Nothing outside that network is scanned.
+The lab needs a copy of this repository (`git clone https://github.com/boidscan/boidscan`). It runs Postgres, five boids and three target containers on a private Docker network. Nothing outside that network is scanned.
 
 ```sh
 ./deploy/lab/flock.sh up      # start the flock
@@ -123,7 +123,7 @@ Boids find each other like this:
 3. Before it trusts a record, it asks the boid at that address to sign a random challenge. Only the owner of the key can, so nobody can point a record at someone else's server.
 4. Every second (in the lab; 30 seconds by default) each boid swaps what it knows with a few random peers. A boid that has not been heard from for 5 rounds is marked suspect, after 30 rounds down.
 
-The lab runs three boids that only know the DNS seed `seeds.boidscan.lab`:
+The lab runs five boids that only know the DNS seed `seeds.boidscan.lab`:
 
 ```sh
 ./deploy/lab/flock.sh demo
@@ -141,13 +141,13 @@ boid-a-1  | 21:13:43 INFO  boid-c (ajqxcywu) is down: no news for 30s
 boid-a-1  | 21:13:45 INFO  boid-c (ajqxcywu) is back
 ```
 
-`./deploy/lab/flock.sh logs` follows a running flock. Each boid's view is on http://localhost:8080, :8081 and :8082, and as JSON at `/fed/v1/peers`. Everything each boid logs, including every gossip exchange, is in `deploy/lab/logs/<boid>.jsonl`.
+`./deploy/lab/flock.sh logs` follows a running flock. Each boid's view is on http://localhost:8080 to :8084, and as JSON at `/fed/v1/peers`. Everything each boid logs, including every gossip exchange, is in `deploy/lab/logs/<boid>.jsonl`.
 
 ## Watch the flock sweep
 
 Each boid can run a worker next to it. Together the workers sweep an address range without anyone in charge:
 
-1. The range is cut into blocks. Every boid ranks the boids for a block the same way, so they agree on which two boids (three outside the lab) hold it. Those are the block's homes.
+1. The range is cut into blocks. Every boid ranks the boids for a block the same way, so they agree on which three boids hold it. Those are the block's homes.
 2. A unit of work is one block and one group of ports. A worker picks the unit its own blocks have gone without longest. When its own blocks are done, it asks other boids for theirs.
 3. Before scanning, the worker asks the unit's homes for a lease. It needs a majority of them, and they refuse a unit that another worker holds or that was scanned recently.
 4. After the scan, the boid sends its results and a signed note that the unit was scanned to the homes. Asking any boid about an address returns what the homes hold.
@@ -173,6 +173,24 @@ The lab flock has its own maintainer key in `deploy/lab/policy/`, created on fir
 ```
 
 `/fed/v1/policy/status` shows each boid's policy serial and why it does not sweep, if it does not.
+
+## Watch boids check each other
+
+Anyone can run a boid, so a boid does not take another's results on trust:
+
+1. When a home receives results, it picks some at random and asks the block's other homes, and the boid that reported them, to look again. It only asks about results it holds, so no boid can point another at an arbitrary address.
+2. A sample counts only when at least two boids besides the scanner agree. If the scanner now sees what they see, the target changed and nobody is blamed.
+3. A boid whose reports others contradict, such as a different certificate or a service nobody else finds, is shunned: its results that no check confirmed are dropped, and it gets no leases.
+4. A boid that misses many services others see is probably blocked by many firewalls. It is not called dishonest, but its "nothing here" reports stop counting and it gets no more leases.
+5. A boid holds blocks for others only after enough of its results passed. Each boid judges every other boid itself; nobody passes judgements on.
+
+In the lab, the targets' firewalls drop boid-d, and boid-e forges results. After `flock.sh sweep`:
+
+```sh
+./deploy/lab/flock.sh misbehave
+```
+
+lets each of them sweep alone while the others check their results. Each boid's judgement of the others is in `/fed/v1/peers` (`trust` and `low_reach`).
 
 ## Build from source
 

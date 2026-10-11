@@ -35,6 +35,7 @@ type memData struct {
 	replicas map[string]ReplicaState
 	runs     []Run
 	excluded netset.Set
+	trust    memTrust
 }
 
 func newMemData(now func() time.Time) *memData {
@@ -230,7 +231,13 @@ func signedObservation(k Signer, ip string, port int, at time.Time) client.Obser
 	return o
 }
 
-var labCatalog, _ = catalog.Lab(netip.MustParsePrefix("172.30.0.0/26"))
+// labCatalog keeps two homes per block, so three test boids have blocks
+// that one of them does not hold.
+var labCatalog = func() catalog.Catalog {
+	c, _ := catalog.Lab(netip.MustParsePrefix("172.30.0.0/26"))
+	c.Replicas = 2
+	return c
+}()
 
 func newDataBoid(t *testing.T, name string, clk *clock, seeds ...string) *testBoid {
 	b := newBoid(t, name, clk, seeds...)
@@ -241,17 +248,19 @@ func newDataBoid(t *testing.T, name string, clk *clock, seeds ...string) *testBo
 	b.cfg.AllowPrivate = true
 	b.cfg.LeaseTTL = 30 * time.Second
 	b.store.data = b.data
+	b.data.trust.peers = b.store
+	b.cfg.Trust = LabTrust()
 	b.install(t, testPolicy(t, 1, clk.now(), nil))
 	return b
 }
 
 func (b *testBoid) currentView(t *testing.T) View {
 	t.Helper()
-	v, _, err := b.view(context.Background())
+	f, err := b.view(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	return v
+	return f.View
 }
 
 func byID(boids []*testBoid) map[string]*testBoid {
@@ -407,21 +416,21 @@ func TestPushRejects(t *testing.T) {
 	tampered.Data = json.RawMessage(`{"status":"forged"}`)
 	public := signedObservation(a.cfg.Key, "8.8.8.8", 22, clk.now())
 	otherCatalog := SignCoverage(a.cfg.Key, catalog.Unit{Block: netip.MustParsePrefix("172.30.0.8/30")}, "other", clk.now())
-	res := push(t, b, pushMsg{Observations: []client.Observation{tampered, public}, Coverage: []Coverage{otherCatalog}})
+	res := push(t, a, b, pushMsg{Observations: []client.Observation{tampered, public}, Coverage: []Coverage{otherCatalog}})
 	if res.Rejected != 3 || res.Stored != 0 || res.Retry {
 		t.Fatalf("push = %+v, want all rejected", res)
 	}
 	good := signedObservation(a.cfg.Key, "172.30.0.5", 22, clk.now())
-	if res := push(t, b, pushMsg{Observations: []client.Observation{good, good}}); res.Stored != 1 {
+	if res := push(t, a, b, pushMsg{Observations: []client.Observation{good, good}}); res.Stored != 1 {
 		t.Fatalf("push = %+v, want the duplicate skipped", res)
 	}
 }
 
-func push(t *testing.T, to *testBoid, msg pushMsg) pushResult {
+func push(t *testing.T, from, to *testBoid, msg pushMsg) pushResult {
 	t.Helper()
 	body, _ := json.Marshal(msg)
 	var res pushResult
-	if err := call(context.Background(), to.srv.Client(), http.MethodPost, to.srv.URL+"/fed/v1/push", body, &res); err != nil {
+	if err := from.signedCall(context.Background(), http.MethodPost, to.srv.URL+"/fed/v1/push", body, &res); err != nil {
 		t.Fatal(err)
 	}
 	return res

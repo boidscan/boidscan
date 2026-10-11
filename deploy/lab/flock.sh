@@ -1,5 +1,5 @@
 #!/bin/sh
-# Starts three boids that find each other through the lab DNS seed and shows what they say.
+# Starts five boids that find each other through the lab DNS seed and shows what they say.
 set -eu
 . "$(dirname "$0")/lib.sh"
 
@@ -12,6 +12,10 @@ usage: ./flock.sh [command]
   up      start the flock in the background
   demo    start the flock, then stop and restart boid-c so you can watch the
           others notice it leave and return
+  misbehave
+          after sweep: let boid-d, which the targets' firewalls drop, and then
+          boid-e, which forges results, sweep alone, and watch the others
+          check their results and judge them
   sweep   start the flock, sign a lab flock policy, start a worker per boid
           and watch them share the lab range: lease a unit, scan it, push the
           results to its homes
@@ -36,11 +40,12 @@ start() {
 	lab_root
 	reset_policies
 	$compose --progress quiet up -d --wait db
-	say "Starting boid-a, boid-b and boid-c. Each knows only the DNS seed seeds.boidscan.lab."
-	$compose --progress quiet up -d boid-a boid-b boid-c
+	say "Starting boid-a to boid-e. Each knows only the DNS seed seeds.boidscan.lab."
+	$compose --progress quiet up -d $boids web sshd redis
 }
 
-follow() { $compose logs -f --no-color boid-a boid-b boid-c "$@"; }
+# shellcheck disable=SC2086
+follow() { $compose logs -f --no-color $boids "$@"; }
 
 sweep() {
 	start
@@ -48,9 +53,26 @@ sweep() {
 	say "The flock formed. Signing a lab flock policy and installing it on boid-a; the others fetch it."
 	install_policy boid-a "$(sign_policy)"
 	wait_for 30 all_hold 1 || { say "The policy did not reach every boid within 30s."; exit 1; }
-	say "Starting a worker per boid; each sweeps 172.30.0.0/26 in /30 blocks, two port groups each."
+	say "Starting workers for boid-a, boid-b and boid-c; they sweep 172.30.0.0/26 in /30 blocks, two port groups each."
 	$compose --profile sweep up -d worker-a worker-b worker-c
 	follow worker-a worker-b worker-c
+}
+
+misbehave() {
+	lab_root
+	$compose stop worker-a worker-b worker-c >/dev/null
+	install_policy boid-a "$(sign_policy '.policy.min_rescan = "10s"')"
+	say "boid-d sweeps alone. The targets drop its packets, so the others find services it missed."
+	$compose --profile sweep up -d worker-d
+	follow worker-d &
+	logs=$!
+	trap 'kill $logs 2>/dev/null' EXIT
+	sleep 120
+	$compose stop worker-d >/dev/null
+	kill $logs
+	say "boid-e sweeps alone and forges results. The others check them and shun it."
+	$compose --profile sweep up -d worker-e
+	follow worker-e
 }
 
 demo() {
@@ -60,7 +82,7 @@ demo() {
 	trap 'kill $logs 2>/dev/null' EXIT
 
 	wait_for 60 flock_formed || { say "The flock did not form within 60s."; exit 1; }
-	say "Every boid has verified the other two. Stopping boid-c: the others mark it suspect after 5s and down after 30s."
+	say "Every boid has verified the other four. Stopping boid-c: the others mark it suspect after 5s and down after 30s."
 	$compose stop boid-c >/dev/null
 	wait_for 60 sees boid-a boid-c down
 	wait_for 10 sees boid-b boid-c down
@@ -76,6 +98,7 @@ watch) start && follow ;;
 up) start ;;
 demo) demo ;;
 sweep) sweep ;;
+misbehave) misbehave ;;
 policy)
 	lab_root
 	install_policy boid-a "$(sign_policy "${2:-.}")"
