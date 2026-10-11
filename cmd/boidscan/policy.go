@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +29,7 @@ Maintainers, offline:
   sign -key FILE POLICY             add this key's signature to a policy or pause
   pause -key FILE -serial N -out F  sign an emergency pause of the policy with serial N
   verify POLICY...                  check signatures, from the trust root through each file
+  bundle POLICY... > policy.json    verify, then write the file boids fetch from the policy URL
 
 Operators:
   install FILE|-                    verify a policy, pause or bundle and store it; gossip spreads it
@@ -40,6 +43,7 @@ func cmdPolicy(ctx context.Context, args []string) error {
 		"sign":    cmdPolicySign,
 		"pause":   cmdPolicyPause,
 		"verify":  cmdPolicyVerify,
+		"bundle":  cmdPolicyBundle,
 		"install": cmdPolicyInstall,
 		"show":    cmdPolicyShow,
 	}
@@ -224,7 +228,6 @@ func cmdPolicyPause(_ context.Context, args []string) error {
 	return writeJSONFile(*out, d)
 }
 
-// cmdPolicyVerify walks the files in order, as a boid would receive them.
 func cmdPolicyVerify(_ context.Context, args []string) error {
 	var rf rootFlag
 	fs := flag.NewFlagSet("policy verify", flag.ContinueOnError)
@@ -239,38 +242,98 @@ func cmdPolicyVerify(_ context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	now := time.Now()
-	var st flockpolicy.State
-	for _, path := range fs.Args() {
+	_, _, err = verifyChain(root, fs.Args(), os.Stdout)
+	return err
+}
+
+// cmdPolicyBundle writes what boids fetch from the policy URL: the policies
+// that changed the maintainers, the newest one, and its emergency pause if
+// one of the files is that pause.
+func cmdPolicyBundle(_ context.Context, args []string) error {
+	var rf rootFlag
+	fs := flag.NewFlagSet("policy bundle", flag.ContinueOnError)
+	rf.register(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() == 0 {
+		return errors.New("usage: boidscan policy bundle POLICY... > policy.json")
+	}
+	root, err := rf.maintainers()
+	if err != nil {
+		return err
+	}
+	st, policies, err := verifyChain(root, fs.Args(), os.Stderr)
+	if err != nil {
+		return err
+	}
+	b := flockpolicy.Bundle{Chain: flockpolicy.Chain(policies, 0)}
+	if st.Pause != nil {
+		b.Pause = &st.Pause.Doc
+	}
+	out, err := json.MarshalIndent(b, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Println(string(out))
+	return err
+}
+
+// verifyChain checks the files from the trust root on, as a boid would
+// receive them: policies by serial, then emergency pauses.
+func verifyChain(root flockpolicy.Maintainers, paths []string, report io.Writer) (flockpolicy.State, []flockpolicy.Policy, error) {
+	type file struct {
+		path   string
+		doc    flockpolicy.Document
+		serial uint64
+	}
+	var policies, pauses []file
+	for _, path := range paths {
 		d, err := readDocument(path)
 		if err != nil {
-			return err
+			return flockpolicy.State{}, nil, err
 		}
 		if d.Pause != nil {
-			p, err := st.AcceptPause(d, now)
-			if err != nil {
-				return fmt.Errorf("%s: %w", path, err)
-			}
-			st.Pause = &p
-			fmt.Printf("%s: emergency pause of policy %d until %s, signed by %s\n", path, p.Serial, sig.Time(p.Expires), shortIDs(d.SignedBy(st.Latest.Maintainers)))
+			pauses = append(pauses, file{path: path, doc: d})
 			continue
 		}
-		set := st.Maintainers(root)
-		p, err := st.Accept(root, d, now)
+		p, err := flockpolicy.Parse(d)
 		if err != nil {
-			return fmt.Errorf("%s: %w", path, err)
+			return flockpolicy.State{}, nil, fmt.Errorf("%s: %w", path, err)
+		}
+		policies = append(policies, file{path, d, p.Serial})
+	}
+	slices.SortFunc(policies, func(a, b file) int { return cmp.Compare(a.serial, b.serial) })
+
+	now := time.Now()
+	var st flockpolicy.State
+	var accepted []flockpolicy.Policy
+	for _, f := range policies {
+		set := st.Maintainers(root)
+		p, err := st.Accept(root, f.doc, now)
+		if err != nil {
+			return st, nil, fmt.Errorf("%s: %w", f.path, err)
 		}
 		st.Latest = &p
+		accepted = append(accepted, p)
 		state := "valid until " + sig.Time(p.Expires)
 		if !now.Before(p.Expires) {
 			state = "expired at " + sig.Time(p.Expires)
 		}
-		fmt.Printf("%s: policy %d, %s, signed by %s (%d needed)\n", path, p.Serial, state, shortIDs(d.SignedBy(set)), set.Threshold)
+		fmt.Fprintf(report, "%s: policy %d, %s, signed by %s (%d needed)\n", f.path, p.Serial, state, shortIDs(f.doc.SignedBy(set)), set.Threshold)
 		if !p.Maintainers.Equal(set) {
-			fmt.Printf("%s: maintainers change to %s\n", path, p.Maintainers)
+			fmt.Fprintf(report, "%s: maintainers change to %s\n", f.path, p.Maintainers)
 		}
 	}
-	return nil
+	for _, f := range pauses {
+		p, err := st.AcceptPause(f.doc, now)
+		if err != nil {
+			return st, nil, fmt.Errorf("%s: %w", f.path, err)
+		}
+		st.Pause = &p
+		fmt.Fprintf(report, "%s: emergency pause of policy %d until %s, signed by %s\n", f.path, p.Serial, sig.Time(p.Expires), shortIDs(f.doc.SignedBy(st.Latest.Maintainers)))
+	}
+	return st, accepted, nil
 }
 
 func shortIDs(ids []string) string {

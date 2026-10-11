@@ -376,3 +376,9 @@ func TestAdopt(t *testing.T) {
 		t.Fatalf("replay: changed %v, %v", changed, err)
 	}
 }
+
+func TestBuiltInRoot(t *testing.T) {
+	if err := Root.check(); err != nil {
+		t.Fatal(err)
+	}
+}
