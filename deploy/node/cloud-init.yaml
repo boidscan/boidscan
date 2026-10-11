@@ -1,0 +1,84 @@
+#cloud-config
+# A boid of the public flock on Ubuntu 26.04, amd64 or arm64, with a public IPv4 address and port 80 open.
+# Fill in /opt/boidscan/boid.env below before boot; the boid starts once cloud-init finishes.
+# It sweeps only while a valid flock policy is in force: https://github.com/boidscan/flock-policy
+
+package_update: true
+packages:
+  - docker.io
+  - docker-compose-v2
+
+write_files:
+  - path: /opt/boidscan/boid.env
+    content: |
+      ABUSE_CONTACT=
+      RATE=10000
+      SEEDS=
+      IMAGE=ghcr.io/boidscan/boidscan:0.0.4
+
+  - path: /opt/boidscan/compose.yaml
+    content: |
+      x-boid: &boid
+        image: ${IMAGE:-ghcr.io/boidscan/boidscan:0.0.4}
+        network_mode: host
+        volumes: ["key:/keys"]
+        environment:
+          BOIDSCAN_DB: postgres://boidscan:boidscan@127.0.0.1:5432/boidscan?sslmode=disable
+          BOIDSCAN_KEY_FILE: /keys/node.key
+          BOIDSCAN_NODE_NAME: ${NAME}
+          BOIDSCAN_ENDPOINT: ${ENDPOINT}
+          BOIDSCAN_ABUSE_CONTACT: ${ABUSE_CONTACT:?set ABUSE_CONTACT in boid.env}
+          BOIDSCAN_SEEDS: ${SEEDS:-}
+
+      volumes:
+        db:
+        key:
+
+      services:
+        db:
+          image: postgres:17.6-bookworm
+          environment:
+            POSTGRES_USER: boidscan
+            POSTGRES_PASSWORD: boidscan
+            POSTGRES_DB: boidscan
+          ports: ["127.0.0.1:5432:5432"]
+          volumes: ["db:/var/lib/postgresql/data"]
+          restart: unless-stopped
+          healthcheck:
+            test: ["CMD", "pg_isready", "-U", "boidscan"]
+            interval: 2s
+            retries: 30
+
+        migrate:
+          <<: *boid
+          command: migrate
+          depends_on:
+            db:
+              condition: service_healthy
+
+        serve:
+          <<: *boid
+          command: serve
+          restart: unless-stopped
+          depends_on:
+            migrate:
+              condition: service_completed_successfully
+
+        worker:
+          <<: *boid
+          # The flock policy's max_rate_pps caps this too.
+          command: worker -rate ${RATE:-10000}
+          cap_add: [NET_RAW, NET_ADMIN]
+          restart: unless-stopped
+          depends_on: [serve]
+
+runcmd:
+  - systemctl enable --now docker
+  - |
+    ip=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+    {
+      cat /opt/boidscan/boid.env
+      echo "NAME=$(hostname -s | cut -c1-32)"
+      echo "ENDPOINT=http://$ip"
+    } > /opt/boidscan/.env
+  - cd /opt/boidscan && docker compose up -d
