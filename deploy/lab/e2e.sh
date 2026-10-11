@@ -1,6 +1,6 @@
 #!/bin/sh
 # Forms the lab flock, scans the isolated lab network, sweeps it with a worker
-# per boid and checks the results through the public API.
+# per boid under signed flock policies and checks the results through the public API.
 set -eu
 . "$(dirname "$0")/lib.sh"
 
@@ -26,9 +26,16 @@ check() {
 
 lab_down >/dev/null 2>&1 || true
 reset_logs
-$compose up -d --build --wait db boid-a boid-b boid-c web sshd redis
+$compose --progress quiet build boid-a
+lab_root
+reset_policies
+$compose up -d --wait db boid-a boid-b boid-c web sshd redis
 
 check "flock formed through the DNS seed" wait_for 60 flock_formed
+case $(policy_halt boid-b) in
+"no flock policy") echo "ok   without a policy the boids do not sweep" ;;
+*) fail "boid-b sweeps without a policy: $(policy_halt boid-b)" ;;
+esac
 $compose stop boid-c >/dev/null
 check "boid-a marks a stopped boid down" wait_for 60 sees boid-a boid-c down
 $compose start boid-c >/dev/null
@@ -97,7 +104,19 @@ check "other hosts scanned again ($before, then $after observations)" test "$((a
 lines=$($compose exec -T boid-a boidscan export ivre 2>/dev/null | wc -l)
 check "ivre export has http records ($lines)" test "$lines" -gt 0
 
+runs() { sweep_runs boid-a boid-b boid-c | wc -l; }
 $compose --profile sweep up -d worker-a worker-b worker-c
+halted() { $compose logs worker-a | grep -q "sweep halted: $1"; }
+check "workers wait for a policy" wait_for 30 halted "no flock policy"
+check "no sweep without a policy" test "$(runs)" -eq 0
+
+check "paused policy 1 installed on boid-a" install_policy boid-a "$(sign_policy '.policy.pause = true')"
+check "policy 1 reached every boid through gossip" wait_for 30 all_hold 1
+check "workers stay idle while the flock is paused" wait_for 30 halted "flock policy 1 pauses the flock"
+check "no sweep while paused" test "$(runs)" -eq 0
+
+check "policy 2 lifts the pause" install_policy boid-a "$(sign_policy '.policy.pause = false')"
+check "policy 2 reached every boid" wait_for 30 all_hold 2
 # 16 blocks of /30, two port groups each.
 units=32
 swept() { test "$(units_scanned | wc -l)" -eq $units; }
@@ -111,5 +130,36 @@ for b in boid-a boid-b boid-c; do
 done
 sleep 5
 check "nothing is scanned again within min-rescan" test "$(sweep_runs boid-a boid-b boid-c | wc -l)" -eq "$total"
+
+if install_policy boid-b policy/1.json >/dev/null 2>&1; then fail "boid-b took policy 1 again"; fi
+echo "ok   an older policy is rejected"
+tampered=$(sign_policy)
+cp "$tampered" policy/tampered.json
+rm "$tampered"
+yq -i -p json -o json '.policy.max_rate_pps = 9999' policy/tampered.json
+out=$(install_policy boid-b policy/tampered.json 2>&1 || true)
+rm policy/tampered.json
+case $out in
+*"signed by 0 maintainers"*) echo "ok   a policy edited after signing is rejected" ;;
+*) fail "tampered policy: $out" ;;
+esac
+
+c_id=$(curl -fsS "$(boid_url boid-c)/fed/v1/node" | yq -p json '.record.id')
+by_c() { for b in boid-a boid-b; do curl -fsS "$(boid_url "$b")/fed/v1/units" | yq -p json ".[] | select(.scanned_by == \"$c_id\") | .block"; done | wc -l; }
+before=$(by_c)
+check "boid-c's coverage is held by the others ($before units)" test "$before" -gt 0
+check "policy 3 revokes boid-c" install_policy boid-a "$(sign_policy ".policy.revoked_nodes = [{\"id\": \"$c_id\", \"reason\": \"e2e\"}]")"
+check "policy 3 reached every boid, boid-c too" wait_for 30 all_hold 3
+check "boid-a marks boid-c revoked" wait_for 10 sees boid-a boid-c revoked
+revoked=$(curl -fsS "$api/fed/v1/revoked" | tr '\n' ' ')
+check "boid-c is on the revoked list ($revoked)" test "$revoked" = "172.30.0.6 "
+check "the others dropped boid-c's coverage" test "$(by_c)" -eq 0
+check "boid-c's worker stops" wait_for 30 sh -c "$compose logs worker-c | grep -q 'sweep halted: flock policy 3 revokes this boid'"
+
+check "policy 4 expires after 20s" install_policy boid-a "$(sign_policy . -for 20s)"
+check "policy 4 reached boid-b" wait_for 30 sh -c 'test "$(curl -fsS http://localhost:8081/fed/v1/policy/status | yq -p json .serial)" = 4'
+expired() { case $(policy_halt "$1") in *"policy 4 expired"*) ;; *) return 1 ;; esac; }
+check "boid-b stops granting leases once policy 4 expires" wait_for 40 expired boid-b
+check "boid-a's worker stops" wait_for 20 halted "flock policy 4 expired"
 
 echo "e2e passed"

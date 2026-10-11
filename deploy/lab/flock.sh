@@ -12,8 +12,12 @@ usage: ./flock.sh [command]
   up      start the flock in the background
   demo    start the flock, then stop and restart boid-c so you can watch the
           others notice it leave and return
-  sweep   start the flock and a worker per boid, and watch them share the
-          lab range: lease a unit, scan it, push the results to its homes
+  sweep   start the flock, sign a lab flock policy, start a worker per boid
+          and watch them share the lab range: lease a unit, scan it, push the
+          results to its homes
+  policy [YQ-EDIT]
+          sign the next lab policy, changed by a yq expression such as
+          '.policy.pause = true', and install it on boid-a
   logs    follow the console output of a running flock
   down    stop the lab and delete its data
 
@@ -29,6 +33,8 @@ start() {
 	reset_logs
 	echo "Building the image and starting the database..."
 	$compose --progress quiet build boid-a
+	lab_root
+	reset_policies
 	$compose --progress quiet up -d --wait db
 	say "Starting boid-a, boid-b and boid-c. Each knows only the DNS seed seeds.boidscan.lab."
 	$compose --progress quiet up -d boid-a boid-b boid-c
@@ -39,7 +45,10 @@ follow() { $compose logs -f --no-color boid-a boid-b boid-c "$@"; }
 sweep() {
 	start
 	wait_for 60 flock_formed || { say "The flock did not form within 60s."; exit 1; }
-	say "The flock formed. Starting a worker per boid; each sweeps 172.30.0.0/26 in /30 blocks, two port groups each."
+	say "The flock formed. Signing a lab flock policy and installing it on boid-a; the others fetch it."
+	install_policy boid-a "$(sign_policy)"
+	wait_for 30 all_hold 1 || { say "The policy did not reach every boid within 30s."; exit 1; }
+	say "Starting a worker per boid; each sweeps 172.30.0.0/26 in /30 blocks, two port groups each."
 	$compose --profile sweep up -d worker-a worker-b worker-c
 	follow worker-a worker-b worker-c
 }
@@ -67,6 +76,10 @@ watch) start && follow ;;
 up) start ;;
 demo) demo ;;
 sweep) sweep ;;
+policy)
+	lab_root
+	install_policy boid-a "$(sign_policy "${2:-.}")"
+	;;
 logs) follow ;;
 down) lab_down ;;
 -h | --help | help) usage ;;

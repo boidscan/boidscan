@@ -166,6 +166,14 @@ worker-b-1  | 23:24:13 INFO  nothing is due for a scan; checking again every 2s
 
 Each boid lists the units it holds at `/fed/v1/units`, its own sweep scans at `/fed/v1/runs`, and which boids hold an address at `/fed/v1/homes?ip=172.30.0.11`.
 
+The lab flock has its own maintainer key in `deploy/lab/policy/`, created on first start. `flock.sh sweep` signs a first policy and installs it on boid-a; the others fetch it through gossip. To sign and install the next one with a change:
+
+```sh
+./deploy/lab/flock.sh policy '.policy.pause = true'
+```
+
+`/fed/v1/policy/status` shows each boid's policy serial and why it does not sweep, if it does not.
+
 ## Build from source
 
 You only need Docker:
@@ -185,13 +193,16 @@ boidscan serve [flags]               info page with search and JSON API
 boidscan worker [flags]              take part in the flock's sweep
 boidscan export ivre                 HTTP(S) results as zgrab2 JSON for IVRE
 boidscan exclude add|rm|list [CIDR]  manage ranges this node never scans
+boidscan policy <command>            create, sign, check and install flock policies
 ```
+
+The worker only sweeps while a valid flock policy is in force; see [GOVERNANCE.md](GOVERNANCE.md).
 
 Settings come from flags or `BOIDSCAN_*` environment variables: `DB`, `PROJECT_URL`, `ABUSE_CONTACT`, `KEY_FILE`, `NODE_NAME`, `LISTEN`, `EXCLUDE_FILE`, `INTERFACE`, `GATEWAY_MAC`, `IP_LAYER`.
 
 Each node signs its results with an Ed25519 key in `KEY_FILE`, created on first start. Its public half is the node ID. `serve` and `scan` must use the same key file.
 
-Federation: `ENDPOINT` (the node's `http://<IPv4>` address, empty disables federation), `SEEDS`, `GOSSIP_INTERVAL`, `MIN_RESCAN` (how often the flock may scan the same unit, default 7 days), `LEASE_TTL`, `IDLE` (the worker's wait when nothing is due). `serve` and `worker` must use the same key file and endpoint. Logging: `LOG_LEVEL` (debug, info, warn, error) for the console, and `DEBUG_LOG`, a file that gets every message at debug level as JSON lines.
+Federation: `ENDPOINT` (the node's `http://<IPv4>` address, empty disables federation), `SEEDS`, `GOSSIP_INTERVAL`, `LEASE_TTL`, `POLICY_URL` (checked hourly for a newer flock policy), `POLICY_ROOT` (maintainer keys of a separate test flock, `key,key:threshold`), `IDLE` (the worker's wait when nothing is due). `serve` and `worker` must use the same key file and endpoint. Logging: `LOG_LEVEL` (debug, info, warn, error) for the console, and `DEBUG_LOG`, a file that gets every message at debug level as JSON lines.
 
 `scan` and `worker` need the `NET_RAW` and `NET_ADMIN` capabilities for ZMap.
 
@@ -203,6 +214,8 @@ Federation: `ENDPOINT` (the node's `http://<IPv4>` address, empty disables feder
 | `GET /api/v1/search?cidr=&port=&q=&cert=&limit=&before=` | results, newest first; `q` is a substring match on the raw result, `cert` matches a SHA-256 fingerprint or hostname, `before` is the `next` value from the previous page |
 | `GET /fed/v1/peers` | this node's record and the boids it knows, with their state |
 | `GET /fed/v1/scanners` | the scanning addresses of this boid and every boid it has verified, one per line, for firewall block lists |
+| `GET /fed/v1/revoked` | the last known addresses of boids the flock policy has removed, one per line |
+| `GET /fed/v1/policy` | the flock policy this boid holds, as a bundle `boidscan policy install` accepts |
 
 Go client: `github.com/boidscan/boidscan/pkg/client`.
 

@@ -239,8 +239,9 @@ func newDataBoid(t *testing.T, name string, clk *clock, seeds ...string) *testBo
 	b.catalogHash = labCatalog.Hash()
 	b.cfg.Data = b.data
 	b.cfg.AllowPrivate = true
-	b.cfg.MinRescan = time.Hour
 	b.cfg.LeaseTTL = 30 * time.Second
+	b.store.data = b.data
+	b.install(t, testPolicy(t, 1, clk.now(), nil))
 	return b
 }
 
@@ -299,7 +300,7 @@ func TestPlacement(t *testing.T) {
 func TestDueUnits(t *testing.T) {
 	now := time.Now()
 	self := Member{ID: "self"}
-	v := NewView(self, nil, labCatalog, "")
+	v := NewView(self, nil, labCatalog, nil)
 	fresh := catalog.Unit{Block: netip.MustParsePrefix("172.30.0.0/30"), Group: 0}
 	stale := catalog.Unit{Block: netip.MustParsePrefix("172.30.0.4/30"), Group: 0}
 	leased := catalog.Unit{Block: netip.MustParsePrefix("172.30.0.8/30"), Group: 1}
@@ -472,9 +473,10 @@ func newTestSweeper(b *testBoid, clk *clock, scanned func(*testBoid, catalog.Uni
 		Name:         b.cfg.Name,
 		Endpoint:     b.srv.URL,
 		Catalog:      labCatalog,
+		RootID:       testRoot.ID(),
+		Version:      b.cfg.Version,
 		AllowPrivate: true,
-		MinRescan:    time.Hour,
-		Scan: func(_ context.Context, u catalog.Unit) error {
+		Scan: func(_ context.Context, u catalog.Unit, _ int) error {
 			b.data.mu.Lock()
 			b.data.runs = append(b.data.runs, Run{Unit: u, StartedAt: clk.now()})
 			b.data.mu.Unlock()

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/boidscan/boidscan/internal/catalog"
+	"github.com/boidscan/boidscan/internal/flockpolicy"
 	"github.com/boidscan/boidscan/internal/netset"
 )
 
@@ -22,19 +23,23 @@ type SweepStore interface {
 	// RecentRun reports whether this boid finished u within the last d.
 	RecentRun(ctx context.Context, u catalog.Unit, d time.Duration) (bool, error)
 	ExclusionSet(ctx context.Context) (*netset.Set, error)
+	PolicyState(ctx context.Context) (flockpolicy.State, error)
 }
 
 type SweepConfig struct {
-	Key          Signer
-	Name         string
-	Endpoint     string
-	Catalog      catalog.Catalog
+	Key      Signer
+	Name     string
+	Endpoint string
+	Catalog  catalog.Catalog
+	// RootID and Version must match what this boid's serve process advertises.
+	RootID       string
+	Version      string
 	AllowPrivate bool
-	MinRescan    time.Duration
 	// Idle is the wait after a round that found nothing to scan.
 	Idle time.Duration
-	// Scan scans one unit and returns once its results are stored.
-	Scan func(ctx context.Context, u catalog.Unit) error
+	// Scan scans one unit at no more than maxRate packets per second and
+	// returns once its results are stored.
+	Scan func(ctx context.Context, u catalog.Unit, maxRate int) error
 }
 
 // Sweeper is the worker side of the background sweep: it leases the stalest
@@ -45,6 +50,8 @@ type Sweeper struct {
 	store  SweepStore
 	client *http.Client
 	now    func() time.Time
+	// halt is the last reason not to sweep, kept only to log changes.
+	halt string
 }
 
 const (
@@ -71,7 +78,7 @@ func (s *Sweeper) Run(ctx context.Context) {
 			idle = false
 			continue
 		}
-		if !idle {
+		if !idle && s.halt == "" {
 			slog.Info("nothing is due for a scan; checking again every " + s.cfg.Idle.String())
 			idle = true
 		}
@@ -84,12 +91,30 @@ func (s *Sweeper) Run(ctx context.Context) {
 
 // Step leases and scans at most one unit. It reports whether it scanned one.
 func (s *Sweeper) Step(ctx context.Context) (bool, error) {
+	st, err := s.store.PolicyState(ctx)
+	if err != nil {
+		return false, err
+	}
+	now := s.now()
+	self := Member{ID: s.cfg.Key.ID(), Name: s.cfg.Name, Endpoint: s.cfg.Endpoint}
+	halt := st.Halt(now, s.cfg.Version, s.hash, self.ID)
+	if halt != s.halt {
+		if halt != "" {
+			slog.Warn("sweep halted: " + halt)
+		} else {
+			slog.Info("sweeping under flock policy "+strconv.FormatUint(st.Serial(), 10), "max_rate", st.Latest.MaxRatePPS, "min_rescan", time.Duration(st.Latest.MinRescan).String())
+		}
+		s.halt = halt
+	}
+	if halt != "" {
+		return false, nil
+	}
+	minRescan := time.Duration(st.Latest.MinRescan)
 	peers, err := s.store.Peers(ctx)
 	if err != nil {
 		return false, err
 	}
-	self := Member{ID: s.cfg.Key.ID(), Name: s.cfg.Name, Endpoint: s.cfg.Endpoint}
-	v := NewView(self, peers, s.cfg.Catalog, s.hash)
+	v := NewView(self, peers, s.cfg.Catalog, func(p Peer) bool { return cooperates(p, s.hash, s.cfg.RootID, st, now) })
 	status, err := s.store.UnitStatus(ctx)
 	if err != nil {
 		return false, err
@@ -99,7 +124,7 @@ func (s *Sweeper) Step(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	excluded.AddSet(netset.Reserved(s.cfg.AllowPrivate))
-	units := dueUnits(s.cfg.Catalog, v, self.ID, status, excluded, s.cfg.MinRescan, s.now(), dueLimit)
+	units := dueUnits(s.cfg.Catalog, v, self.ID, status, excluded, minRescan, now, dueLimit)
 	from := "its own blocks"
 	if len(units) == 0 {
 		units, from = s.steal(ctx, v)
@@ -108,7 +133,7 @@ func (s *Sweeper) Step(ctx context.Context) (bool, error) {
 		if !s.cfg.Catalog.Valid(u) || excluded.Covers(u.Block) {
 			continue
 		}
-		if recent, err := s.store.RecentRun(ctx, u, s.cfg.MinRescan); err != nil || recent {
+		if recent, err := s.store.RecentRun(ctx, u, minRescan); err != nil || recent {
 			continue
 		}
 		homes := v.Homes(u.Block)
@@ -119,7 +144,7 @@ func (s *Sweeper) Step(ctx context.Context) (bool, error) {
 			continue
 		}
 		slog.Info("leased "+u.String()+" from "+from, "homes", labels(granted))
-		return true, s.work(ctx, u, granted, ttl)
+		return true, s.work(ctx, u, granted, ttl, st.Latest.MaxRatePPS)
 	}
 	return false, nil
 }
@@ -181,7 +206,7 @@ func (s *Sweeper) request(ctx context.Context, u catalog.Unit, homes []Member, r
 
 // work scans u while renewing the lease. Coverage ends the lease at the homes
 // once it reaches them; only a failed scan releases it.
-func (s *Sweeper) work(ctx context.Context, u catalog.Unit, homes []Member, ttl time.Duration) error {
+func (s *Sweeper) work(ctx context.Context, u catalog.Unit, homes []Member, ttl time.Duration, maxRate int) error {
 	done := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Go(func() {
@@ -199,7 +224,7 @@ func (s *Sweeper) work(ctx context.Context, u catalog.Unit, homes []Member, ttl 
 		}
 	})
 	start := s.now()
-	err := s.cfg.Scan(ctx, u)
+	err := s.cfg.Scan(ctx, u, maxRate)
 	close(done)
 	wg.Wait()
 	if err != nil {

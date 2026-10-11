@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/boidscan/boidscan/internal/catalog"
+	"github.com/boidscan/boidscan/internal/flockpolicy"
 	"github.com/boidscan/boidscan/pkg/sig"
 )
 
@@ -26,6 +27,8 @@ const (
 	StateAlive   = "alive"
 	StateSuspect = "suspect"
 	StateDown    = "down"
+	// StateRevoked peers are named in the flock policy; nobody works with them.
+	StateRevoked = "revoked"
 
 	// A peer is suspect after this many gossip intervals without a fresher
 	// record, and down after downAfter.
@@ -37,6 +40,8 @@ const (
 	maxClockSkew  = 2 * time.Minute
 	verifyPerTick = 8
 	seedEvery     = 10
+	// policyURLEvery is how often the project's policy URL is checked.
+	policyURLEvery = time.Hour
 )
 
 type Peer struct {
@@ -55,6 +60,10 @@ type Store interface {
 	MarkVerified(ctx context.Context, id, endpoint string) error
 	SetPeerState(ctx context.Context, id, state string) error
 	DeletePeer(ctx context.Context, id string) error
+
+	flockpolicy.Store
+	// Policies lists the stored policies, oldest first.
+	Policies(ctx context.Context) ([]flockpolicy.Policy, error)
 }
 
 type Resolver interface {
@@ -73,19 +82,22 @@ type Config struct {
 	Interval time.Duration
 	// AllowPrivate accepts RFC 1918 endpoints and results, for the lab.
 	AllowPrivate bool
+	// Root is the maintainer set the first flock policy must be signed by.
+	Root flockpolicy.Maintainers
+	// PolicyURL is checked hourly for a newer policy bundle; empty disables it.
+	PolicyURL string
 
 	Catalog catalog.Catalog
 	// Data enables replication, routed host lookups and leases. Without it
 	// the boid only takes part in discovery.
-	Data Data
-	// MinRescan is how often the flock may scan the same unit.
-	MinRescan time.Duration
-	LeaseTTL  time.Duration
+	Data     Data
+	LeaseTTL time.Duration
 }
 
 type Node struct {
 	cfg           Config
 	catalogHash   string
+	rootID        string
 	store         Store
 	client        *http.Client
 	resolver      Resolver
@@ -95,6 +107,13 @@ type Node struct {
 	mu        sync.Mutex
 	ticks     int
 	lastSeeds string
+	// policy is refreshed from the store every tick, for the own record and seeds.
+	policy flockpolicy.State
+	halt   string
+	// fetched remembers which serial was last fetched from each peer, so a
+	// peer that advertises a policy it cannot show is asked only once.
+	fetched    map[string]string
+	urlFetched time.Time
 }
 
 func New(cfg Config, st Store) (*Node, error) {
@@ -107,6 +126,7 @@ func New(cfg Config, st Store) (*Node, error) {
 	n := &Node{
 		cfg:         cfg,
 		catalogHash: cfg.Catalog.Hash(),
+		rootID:      cfg.Root.ID(),
 		store:       st,
 		// Shorter than the interval, or a dead peer delays the next round.
 		client:   &http.Client{Timeout: min(max(cfg.Interval, time.Second), 5*time.Second)},
@@ -114,7 +134,8 @@ func New(cfg Config, st Store) (*Node, error) {
 		checkEndpoint: func(e string) error {
 			return checkEndpoint(e, cfg.AllowPrivate)
 		},
-		now: time.Now,
+		now:     time.Now,
+		fetched: map[string]string{},
 	}
 	if err := n.checkEndpoint(cfg.Endpoint); err != nil {
 		return nil, err
@@ -127,14 +148,18 @@ func New(cfg Config, st Store) (*Node, error) {
 
 // Self is this boid's record, freshly signed.
 func (n *Node) Self() Record {
+	st := n.policyState()
 	r := Record{
-		Name:       n.cfg.Name,
-		Endpoint:   n.cfg.Endpoint,
-		Contact:    n.cfg.Contact,
-		ProjectURL: n.cfg.ProjectURL,
-		Version:    n.cfg.Version,
-		Catalog:    n.catalogHash,
-		Time:       n.now(),
+		Name:           n.cfg.Name,
+		Endpoint:       n.cfg.Endpoint,
+		Contact:        n.cfg.Contact,
+		ProjectURL:     n.cfg.ProjectURL,
+		Version:        n.cfg.Version,
+		Catalog:        n.catalogHash,
+		Root:           n.rootID,
+		PolicySerial:   st.Serial(),
+		EmergencyPause: st.Paused(n.now()),
+		Time:           n.now(),
 	}
 	r.sign(n.cfg.Key)
 	return r
@@ -144,7 +169,8 @@ func (n *Node) Peers(ctx context.Context) ([]Peer, error) { return n.store.Peers
 
 func (n *Node) Run(ctx context.Context) {
 	self := n.Self()
-	slog.Info("I am "+self.Label()+", reachable at "+self.Endpoint, "id", self.ID, "gossip_every", n.cfg.Interval.String(), "catalog", n.cfg.Catalog.Name+" "+sig.Short(n.catalogHash))
+	slog.Info("I am "+self.Label()+", reachable at "+self.Endpoint, "id", self.ID, "gossip_every", n.cfg.Interval.String(),
+		"catalog", n.cfg.Catalog.Name+" "+sig.Short(n.catalogHash), "root", sig.Short(n.rootID))
 	if n.cfg.Data != nil {
 		go n.replicateLoop(ctx)
 	}
@@ -166,6 +192,7 @@ func (n *Node) Tick(ctx context.Context) {
 	n.ticks++
 	tick := n.ticks
 	n.mu.Unlock()
+	n.loadPolicy(ctx)
 
 	peers, err := n.store.Peers(ctx)
 	if err != nil {
@@ -201,8 +228,9 @@ func (n *Node) Tick(ctx context.Context) {
 		return
 	}
 	verifying := 0
+	n.syncPolicy(ctx, peers)
 	for _, p := range peers {
-		if !p.Verified && verifying < verifyPerTick {
+		if !p.Verified && p.State != StateRevoked && verifying < verifyPerTick {
 			verifying++
 			wg.Go(func() { n.verify(ctx, p) })
 		}
@@ -217,7 +245,7 @@ func (n *Node) Tick(ctx context.Context) {
 func gossipable(peers []Peer) []Peer {
 	var out []Peer
 	for _, p := range peers {
-		if p.Verified && p.State != StateDown {
+		if p.Verified && p.State != StateDown && p.State != StateRevoked {
 			out = append(out, p)
 		}
 	}
@@ -226,7 +254,15 @@ func gossipable(peers []Peer) []Peer {
 
 func (n *Node) resolveSeeds(ctx context.Context, bootstrapping bool) []string {
 	var urls, notes []string
-	for _, s := range n.cfg.Seeds {
+	seeds := slices.Clone(n.cfg.Seeds)
+	if p := n.policyState().Latest; p != nil {
+		for _, s := range p.Seeds {
+			if !slices.Contains(seeds, s) {
+				seeds = append(seeds, s)
+			}
+		}
+	}
+	for _, s := range seeds {
 		if strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") {
 			urls = append(urls, strings.TrimSuffix(s, "/"))
 			notes = append(notes, s)
@@ -254,7 +290,7 @@ func (n *Node) resolveSeeds(ctx context.Context, bootstrapping bool) []string {
 	n.lastSeeds = strings.Join(notes, "; ")
 	n.mu.Unlock()
 	switch {
-	case bootstrapping && len(n.cfg.Seeds) == 0:
+	case bootstrapping && len(seeds) == 0:
 		slog.Debug("no peers and no seeds; waiting for another boid to contact this one")
 	case bootstrapping && changed && len(notes) > 0:
 		slog.Info("looking for the flock through seeds: " + strings.Join(notes, "; "))
@@ -327,8 +363,9 @@ func (n *Node) ingest(ctx context.Context, records []Record, via string) {
 		records = records[:maxRecords]
 	}
 	self := n.cfg.Key.ID()
+	pol := n.policyState().Latest
 	for _, r := range records {
-		if r.ID == self {
+		if r.ID == self || pol.Revoked(r.ID) {
 			continue
 		}
 		if err := r.verify(); err != nil {
@@ -417,6 +454,9 @@ func (n *Node) updateStates(ctx context.Context) bool {
 	now := n.now()
 	changed := false
 	for _, p := range peers {
+		if p.State == StateRevoked {
+			continue
+		}
 		age := now.Sub(p.Time)
 		want := n.stateFor(age)
 		if !p.Verified {
@@ -454,12 +494,12 @@ func (n *Node) logFlock(ctx context.Context) {
 	}
 	byState := map[string][]string{}
 	for _, p := range peers {
-		if p.Verified {
+		if p.Verified || p.State == StateRevoked {
 			byState[p.State] = append(byState[p.State], p.Name)
 		}
 	}
 	var parts []string
-	for _, s := range []string{StateAlive, StateSuspect, StateDown} {
+	for _, s := range []string{StateAlive, StateSuspect, StateDown, StateRevoked} {
 		if names := byState[s]; len(names) > 0 {
 			slices.Sort(names)
 			parts = append(parts, fmt.Sprintf("%d %s (%s)", len(names), s, strings.Join(names, ", ")))
@@ -477,6 +517,9 @@ func (n *Node) Handler() http.Handler {
 	mux.HandleFunc("POST /fed/v1/gossip", n.handleGossip)
 	mux.HandleFunc("GET /fed/v1/peers", n.handlePeers)
 	mux.HandleFunc("GET /fed/v1/scanners", n.handleScanners)
+	mux.HandleFunc("GET /fed/v1/revoked", n.handleRevoked)
+	mux.HandleFunc("GET /fed/v1/policy", n.handlePolicy)
+	mux.HandleFunc("GET /fed/v1/policy/status", n.handlePolicyStatus)
 	if n.cfg.Data != nil {
 		mux.HandleFunc("POST /fed/v1/push", n.handlePush)
 		mux.HandleFunc("POST /fed/v1/lease", n.handleLease)
@@ -550,10 +593,32 @@ func (n *Node) handleScanners(w http.ResponseWriter, r *http.Request) {
 	}
 	endpoints := []string{n.cfg.Endpoint}
 	for _, p := range peers {
-		if p.Verified {
+		if p.Verified && p.State != StateRevoked {
 			endpoints = append(endpoints, p.Endpoint)
 		}
 	}
+	writeIPs(w, endpoints)
+}
+
+// handleRevoked lists the last known address of every revoked boid, for
+// firewall block lists: they may still scan, outside the flock.
+func (n *Node) handleRevoked(w http.ResponseWriter, r *http.Request) {
+	peers, err := n.store.Peers(r.Context())
+	if err != nil {
+		slog.Error("loading peers", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	var endpoints []string
+	for _, p := range peers {
+		if p.State == StateRevoked {
+			endpoints = append(endpoints, p.Endpoint)
+		}
+	}
+	writeIPs(w, endpoints)
+}
+
+func writeIPs(w http.ResponseWriter, endpoints []string) {
 	var ips []netip.Addr
 	for _, e := range endpoints {
 		if ip, err := netip.ParseAddr(strings.TrimPrefix(e, "http://")); err == nil {

@@ -26,7 +26,9 @@ x-boid-env: &boid-env
   BOIDSCAN_GOSSIP_INTERVAL: 1s
   BOIDSCAN_LAB: "true"
   BOIDSCAN_LAB_RANGE: 172.30.0.0/26
-  BOIDSCAN_MIN_RESCAN: 1h
+  # Set by lib.sh from the lab maintainer key in ./policy.
+  BOIDSCAN_POLICY_ROOT: ${LAB_POLICY_ROOT:-}
+  BOIDSCAN_POLICY_URL: ""
   BOIDSCAN_LEASE_TTL: 30s
 
 # A worker shares its boid's network namespace, so it scans from the boid's endpoint address.

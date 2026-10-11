@@ -37,7 +37,7 @@ The rules that apply to the whole flock are in a short document, the flock polic
 
 Maintainers sign the policy with their own keys, offline. A policy is valid only with enough signatures. Every boid passes the policy on to its peers, and no boid can forge it. A copy that arrived through gossip, a web page or DNS is as good as one from the project.
 
-**Every policy expires**, 14 days after it is signed. A boid with no valid policy stops scanning and keeps serving the data it has. If the maintainers disappear, the flock winds down instead of running on without anyone responsible.
+**Every policy expires**, 14 days after it is signed. Boids reject any policy that is valid for more than 31 days. A boid with no valid policy stops scanning and keeps serving the data it has. If the maintainers disappear, the flock winds down instead of running on without anyone responsible.
 
 Maintainers set rules. They do not decide who scans what. Scanning work is still shared out between the boids with no one in charge.
 

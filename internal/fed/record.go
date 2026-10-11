@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"time"
 	"unicode"
 
@@ -25,9 +26,13 @@ type Record struct {
 	ProjectURL string `json:"project_url"`
 	Version    string `json:"version"`
 	// Catalog is the hash of the work catalog; boids share work only with equal catalogs.
-	Catalog   string    `json:"catalog"`
-	Time      time.Time `json:"time"`
-	Signature []byte    `json:"signature"`
+	Catalog string `json:"catalog"`
+	// Root names the first maintainer set; boids with different roots are different flocks.
+	Root           string    `json:"root"`
+	PolicySerial   uint64    `json:"policy_serial"`
+	EmergencyPause bool      `json:"emergency_pause,omitempty"`
+	Time           time.Time `json:"time"`
+	Signature      []byte    `json:"signature"`
 }
 
 type Signer interface {
@@ -36,7 +41,8 @@ type Signer interface {
 }
 
 func (r Record) message() []byte {
-	return sig.Message("boidscan-node-v1", r.ID, r.Name, r.Endpoint, r.Contact, r.ProjectURL, r.Version, r.Catalog, sig.Time(r.Time))
+	return sig.Message("boidscan-node-v2", r.ID, r.Name, r.Endpoint, r.Contact, r.ProjectURL, r.Version, r.Catalog,
+		r.Root, strconv.FormatUint(r.PolicySerial, 10), strconv.FormatBool(r.EmergencyPause), sig.Time(r.Time))
 }
 
 func (r *Record) sign(k Signer) {
@@ -52,7 +58,7 @@ func (r Record) Label() string {
 }
 
 func (r Record) verify() error {
-	for field, v := range map[string]string{"name": r.Name, "endpoint": r.Endpoint, "contact": r.Contact, "project_url": r.ProjectURL, "version": r.Version, "catalog": r.Catalog} {
+	for field, v := range map[string]string{"name": r.Name, "endpoint": r.Endpoint, "contact": r.Contact, "project_url": r.ProjectURL, "version": r.Version, "catalog": r.Catalog, "root": r.Root} {
 		if len(v) > 256 {
 			return fmt.Errorf("%s is too long", field)
 		}

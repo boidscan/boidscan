@@ -19,8 +19,7 @@ type Member struct {
 
 func (m Member) Label() string { return Record{ID: m.ID, Name: m.Name}.Label() }
 
-// View is one boid's idea of the flock: itself plus the verified, reachable
-// peers with the same catalog.
+// View is one boid's idea of the flock: itself plus the peers it cooperates with.
 type View struct {
 	self     string
 	members  map[string]Member
@@ -28,10 +27,10 @@ type View struct {
 	replicas int
 }
 
-func NewView(self Member, peers []Peer, cat catalog.Catalog, catalogHash string) View {
+func NewView(self Member, peers []Peer, cat catalog.Catalog, keep func(Peer) bool) View {
 	v := View{self: self.ID, members: map[string]Member{self.ID: self}, replicas: cat.Replicas}
 	for _, p := range peers {
-		if p.Verified && (p.State == StateAlive || p.State == StateSuspect) && p.Catalog == catalogHash {
+		if keep(p) {
 			v.members[p.ID] = Member{ID: p.ID, Name: p.Name, Endpoint: p.Endpoint}
 		}
 	}

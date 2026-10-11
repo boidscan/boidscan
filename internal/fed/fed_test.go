@@ -2,6 +2,7 @@ package fed
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"maps"
 	"net/http"
@@ -14,15 +15,124 @@ import (
 	"testing"
 	"time"
 
+	"github.com/boidscan/boidscan/internal/flockpolicy"
 	"github.com/boidscan/boidscan/internal/identity"
+	"github.com/boidscan/boidscan/pkg/client"
 )
 
 type memStore struct {
-	mu    sync.Mutex
-	peers map[string]*Peer
+	mu       sync.Mutex
+	peers    map[string]*Peer
+	policies []flockpolicy.Policy
+	pause    *flockpolicy.Pause
+	// data loses the rows of revoked boids.
+	data *memData
 }
 
 func newMemStore() *memStore { return &memStore{peers: map[string]*Peer{}} }
+
+func (m *memStore) PolicyState(context.Context) (flockpolicy.State, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st := flockpolicy.State{Expires: map[uint64]time.Time{}}
+	for _, p := range m.policies {
+		st.Expires[p.Serial] = p.Expires
+	}
+	if len(m.policies) > 0 {
+		p := m.policies[len(m.policies)-1]
+		st.Latest = &p
+		if m.pause != nil && m.pause.Serial == p.Serial {
+			st.Pause = m.pause
+		}
+	}
+	return st, nil
+}
+
+func (m *memStore) Policies(context.Context) ([]flockpolicy.Policy, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.policies), nil
+}
+
+func (m *memStore) AddPolicy(_ context.Context, p flockpolicy.Policy) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if n := len(m.policies); n > 0 && m.policies[n-1].Serial >= p.Serial {
+		return false, nil
+	}
+	m.policies = append(m.policies, p)
+	return true, nil
+}
+
+func (m *memStore) AddPause(_ context.Context, p flockpolicy.Pause) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.pause != nil && m.pause.Serial == p.Serial {
+		return false, nil
+	}
+	m.pause = &p
+	return true, nil
+}
+
+func (m *memStore) SyncRevoked(_ context.Context, ids []string, self string) error {
+	m.mu.Lock()
+	for _, p := range m.peers {
+		switch {
+		case slices.Contains(ids, p.ID):
+			p.State = StateRevoked
+		case p.State == StateRevoked:
+			p.State, p.Verified = StateNew, false
+		}
+	}
+	m.mu.Unlock()
+	if m.data == nil {
+		return nil
+	}
+	gone := func(id string) bool { return id != self && slices.Contains(ids, id) }
+	m.data.mu.Lock()
+	defer m.data.mu.Unlock()
+	m.data.obs = slices.DeleteFunc(m.data.obs, func(o client.Observation) bool { return gone(o.NodeID) })
+	m.data.cov = slices.DeleteFunc(m.data.cov, func(c Coverage) bool { return gone(c.NodeID) })
+	return nil
+}
+
+// testRoot signs the policies of every test flock.
+var testRootKey, _ = identity.Generate()
+var testRoot = flockpolicy.Maintainers{Keys: []string{testRootKey.ID()}, Threshold: 1}
+
+// testPolicy is a signed policy for the lab catalog; edit may change it before signing.
+func testPolicy(t *testing.T, serial uint64, issued time.Time, edit func(*flockpolicy.Body)) flockpolicy.Document {
+	t.Helper()
+	b := flockpolicy.Body{
+		Serial:       serial,
+		Issued:       issued,
+		Expires:      issued.Add(flockpolicy.DefaultLifetime),
+		MaxRatePPS:   1000,
+		MinRescan:    flockpolicy.Duration(time.Hour),
+		BumpInterval: flockpolicy.Duration(time.Hour),
+		Catalog:      labCatalog.Hash(),
+		Maintainers:  testRoot,
+	}
+	if edit != nil {
+		edit(&b)
+	}
+	raw, err := json.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := flockpolicy.Document{Policy: raw}
+	d.Sign(testRootKey)
+	return d
+}
+
+// install gives b a policy the way an operator would, without gossip.
+func (b *testBoid) install(t *testing.T, d flockpolicy.Document) {
+	t.Helper()
+	_, changed, err := flockpolicy.Adopt(context.Background(), b.store, testRoot, b.cfg.Key.ID(), flockpolicy.Bundle{Chain: []flockpolicy.Document{d}}, b.now())
+	if err != nil || !changed {
+		t.Fatalf("installing a policy on %s: changed %v, %v", b.cfg.Name, changed, err)
+	}
+}
 
 func (m *memStore) SavePeer(_ context.Context, r Record) (bool, bool, error) {
 	m.mu.Lock()
@@ -123,7 +233,9 @@ func newBoid(t *testing.T, name string, clk *clock, seeds ...string) *testBoid {
 	key, _ := identity.Generate()
 	st := newMemStore()
 	b.Node = &Node{
-		cfg:           Config{Key: key, Name: name, Endpoint: srv.URL, Contact: "abuse@example.org", Seeds: seeds, Interval: time.Second},
+		cfg:           Config{Key: key, Name: name, Endpoint: srv.URL, Contact: "abuse@example.org", Version: "v1.0.0", Seeds: seeds, Interval: time.Second, Root: testRoot},
+		rootID:        testRoot.ID(),
+		fetched:       map[string]string{},
 		store:         st,
 		client:        srv.Client(),
 		resolver:      fakeResolver{},

@@ -59,6 +59,13 @@ func ObservationMessage(ip string, port int, name, protocol, status string, seen
 	return Message("boidscan-observation-v1", ip, strconv.Itoa(port), name, protocol, status, Time(seenAt), hex.EncodeToString(sum[:]))
 }
 
+// JSONMessage signs a JSON document by the hash of its canonical form, so it
+// survives being relayed with different whitespace.
+func JSONMessage(tag string, raw []byte) []byte {
+	sum := sha256.Sum256(canonicalJSON(raw))
+	return Message(tag, hex.EncodeToString(sum[:]))
+}
+
 // canonicalJSON is the form encoding/json emits for a json.RawMessage, so a
 // result re-encoded by an API response still hashes the same.
 func canonicalJSON(raw []byte) []byte {

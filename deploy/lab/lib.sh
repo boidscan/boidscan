@@ -73,3 +73,58 @@ reset_logs() {
 	mkdir -p logs
 	docker run --rm -v "$PWD/logs:/logs" alpine:3.22.1 sh -c 'rm -f /logs/*.jsonl'
 }
+
+# A fresh lab starts without policies; the maintainer key stays.
+reset_policies() { rm -f policy/[0-9]*.json; }
+
+# The lab flock trusts its own maintainer key, kept in ./policy and created on
+# first use. Needs the boidscan:lab image.
+policy_tool() {
+	docker run --rm -u "$(id -u):$(id -g)" -v "$PWD/policy:/policy" boidscan:lab policy "$@"
+}
+
+lab_root() {
+	mkdir -p policy
+	if [ ! -f policy/root.txt ]; then
+		id=$(policy_tool keygen -out /policy/maintainer.key)
+		echo "$id:1" >policy/root.txt
+	fi
+	LAB_POLICY_ROOT=$(cat policy/root.txt)
+	export LAB_POLICY_ROOT
+}
+
+# latest_policy prints the serial of the newest policy in ./policy, or 0.
+latest_policy() {
+	ls policy | sed -n 's/^\([0-9]*\)\.json$/\1/p' | sort -n | tail -1 | grep . || echo 0
+}
+
+# sign_policy [YQ-EDIT [NEW-FLAGS...]] writes and signs the next policy and prints its file.
+sign_policy() {
+	edit=${1:-.}
+	[ $# -gt 0 ] && shift
+	prev=$(latest_policy)
+	next=$((prev + 1))
+	if [ "$prev" = 0 ]; then
+		from="-policy-root $LAB_POLICY_ROOT"
+	else
+		from="-from /policy/$prev.json"
+	fi
+	# shellcheck disable=SC2086
+	policy_tool new -lab -lab-range 172.30.0.0/26 $from -out "/policy/$next.json" "$@" >/dev/null 2>&1
+	yq -i -p json -o json ".policy.min_rescan = \"1h\" | $edit" "policy/$next.json"
+	policy_tool sign -key /policy/maintainer.key "/policy/$next.json" >/dev/null 2>&1
+	echo "policy/$next.json"
+}
+
+# install_policy BOID FILE stores a policy on BOID; gossip takes it to the others.
+install_policy() { $compose exec -T "$1" boidscan policy install - <"$2"; }
+
+policy_serial() { curl -fsS "$(boid_url "$1")/fed/v1/policy/status" | yq -p json '.serial'; }
+policy_halt() { curl -fsS "$(boid_url "$1")/fed/v1/policy/status" | yq -p json '.halt // ""'; }
+
+# all_hold SERIAL succeeds once every boid holds that policy.
+all_hold() {
+	for b in boid-a boid-b boid-c; do
+		test "$(policy_serial "$b")" = "$1" || return 1
+	done
+}
