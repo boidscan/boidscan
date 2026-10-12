@@ -2,7 +2,7 @@
 
 A free and open source index of publicly reachable services, in the spirit of Shodan and Censys, run by its community.
 
-The name comes from [Boids](https://en.wikipedia.org/wiki/Boids), Craig Reynolds' 1986 flocking simulation. Many simple agents following a few local rules end up behaving like one flock. Boidscan nodes ("boids") are meant to work the same way: they find each other, share out a sweep of the address space and keep copies of each other's results (see [Watch boids find each other](#watch-boids-find-each-other) and [Watch the flock sweep](#watch-the-flock-sweep)). The public flock started in October 2026 with a single boid at http://157.180.95.126. Its rules are in the signed [flock policy](https://github.com/boidscan/flock-policy).
+The name comes from [Boids](https://en.wikipedia.org/wiki/Boids), Craig Reynolds' 1986 flocking simulation. Many simple agents following a few local rules end up behaving like one flock. Boidscan nodes ("boids") are meant to work the same way: they find each other, share out a sweep of the address space and keep copies of each other's results (see [Watch boids find each other](#watch-boids-find-each-other) and [Watch the flock sweep](#watch-the-flock-sweep)). The public flock started in October 2026; details are at https://boidscan.network. Its rules are in the signed [flock policy](https://github.com/boidscan/flock-policy).
 
 ## What boidscan is, and what it is not
 
