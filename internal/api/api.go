@@ -156,6 +156,10 @@ func (s *Server) runSearch(ctx context.Context, v url.Values) (*searchView, int)
 		sv.Error = err.Error()
 		return sv, http.StatusBadRequest
 	}
+	if errors.Is(err, store.ErrSearchTimeout) {
+		sv.Error = "The search took too long. Narrow it with a port or an address range."
+		return sv, http.StatusServiceUnavailable
+	}
 	if err != nil {
 		slog.Error("search", "err", err)
 		sv.Error = "The search failed."
@@ -220,6 +224,10 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	page, err := s.backend.Search(r.Context(), q)
 	if errors.Is(err, store.ErrBadQuery) {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if errors.Is(err, store.ErrSearchTimeout) {
+		writeError(w, http.StatusServiceUnavailable, "search too broad, narrow it with port or cidr")
 		return
 	}
 	if err != nil {

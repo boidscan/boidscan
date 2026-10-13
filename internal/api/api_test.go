@@ -33,6 +33,9 @@ func (f *fakeBackend) Search(_ context.Context, q client.Query) (client.Page, er
 	if q.Port > 65535 {
 		return client.Page{}, store.ErrBadQuery
 	}
+	if q.Text == "slow" {
+		return client.Page{}, store.ErrSearchTimeout
+	}
 	f.queries = append(f.queries, q)
 	p := f.pages[0]
 	f.pages = f.pages[1:]
@@ -81,6 +84,10 @@ func TestClientRoundTrip(t *testing.T) {
 	_, err = c.Search(ctx, client.Query{Port: 70000})
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %v", err)
+	}
+	_, err = c.Search(ctx, client.Query{Text: "slow"})
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %v", err)
 	}
 }
 
@@ -139,6 +146,9 @@ func TestSearchForm(t *testing.T) {
 	}
 	if code, _ := get("q=x&port=abc"); code != http.StatusBadRequest {
 		t.Fatalf("bad port: status %d, want 400", code)
+	}
+	if code, body := get("q=slow"); code != http.StatusServiceUnavailable || !strings.Contains(body, "took too long") {
+		t.Fatalf("slow search: status %d, want 503: %s", code, body)
 	}
 }
 

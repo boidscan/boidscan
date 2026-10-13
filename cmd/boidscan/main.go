@@ -441,6 +441,7 @@ func cmdServe(ctx context.Context, args []string) error {
 		return err
 	}
 	defer st.Close()
+	go backfillSearchText(ctx, st)
 
 	site := api.New(st, c.id)
 	mux := http.NewServeMux()
@@ -503,6 +504,27 @@ func cmdServe(ctx context.Context, args []string) error {
 		return err
 	}
 	return nil
+}
+
+func backfillSearchText(ctx context.Context, st *store.Store) {
+	pending, err := st.SearchTextPending(ctx)
+	if err != nil {
+		slog.Error("counting observations without search text", "err", err)
+		return
+	}
+	if pending == 0 {
+		return
+	}
+	slog.Info("filling search text for older observations; text search misses them until done", "rows", pending)
+	start := time.Now()
+	n, err := st.BackfillSearchText(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Error("filling search text", "err", err, "rows", n)
+		}
+		return
+	}
+	slog.Info("filled search text", "rows", n, "took", time.Since(start).Round(time.Second))
 }
 
 func cmdExport(ctx context.Context, args []string) error {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/boidscan/boidscan/internal/catalog"
@@ -137,10 +138,10 @@ func (s *Store) AddObservation(ctx context.Context, runID int64, k fed.Signer, o
 	signature := k.Sign(sig.ObservationMessage(ip, int(o.Port), o.Name, o.Protocol, o.Status, seen, o.Raw))
 	// The guard catches exclusions added while a scan is already running.
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO observations (run_id, node_id, ip, port, name, protocol, status, seen_at, cert_sha256, cert_names, raw, signature)
-		 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+		`INSERT INTO observations (run_id, node_id, ip, port, name, protocol, status, seen_at, cert_sha256, cert_names, raw, signature, search_text)
+		 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
 		 WHERE NOT EXISTS (SELECT 1 FROM exclusions WHERE $3::inet <<= cidr)`,
-		runID, k.ID(), ip, int32(o.Port), o.Name, o.Protocol, o.Status, seen, shaArg, names, []byte(o.Raw), signature)
+		runID, k.ID(), ip, int32(o.Port), o.Name, o.Protocol, o.Status, seen, shaArg, names, []byte(o.Raw), signature, SearchText(o.Raw, names))
 	return err
 }
 
@@ -195,7 +196,7 @@ func buildSearch(q client.Query) (string, []any, error) {
 		add("port = ?", q.Port)
 	}
 	if q.Text != "" {
-		add("raw::text ILIKE ?", "%"+escapeLike(q.Text)+"%")
+		add("search_text LIKE ?", "%"+escapeLike(strings.ToLower(q.Text))+"%")
 	}
 	if q.Cert != "" {
 		args = append(args, strings.ToLower(q.Cert))
@@ -228,13 +229,37 @@ func clampLimit(n int) int {
 // ErrBadQuery wraps query validation errors so callers can map them to 400.
 var ErrBadQuery = errors.New("bad query")
 
+// ErrSearchTimeout means a search ran past searchTimeout and was cancelled by Postgres.
+var ErrSearchTimeout = errors.New("search timed out")
+
+const searchTimeout = "5s"
+
 func (s *Store) Search(ctx context.Context, q client.Query) (client.Page, error) {
+	page, err := s.search(ctx, q)
+	var pgErr *pgconn.PgError
+	// 57014 is query_canceled - https://www.postgresql.org/docs/current/errcodes-appendix.html
+	if errors.As(err, &pgErr) && pgErr.Code == "57014" && ctx.Err() == nil {
+		return page, ErrSearchTimeout
+	}
+	return page, err
+}
+
+func (s *Store) search(ctx context.Context, q client.Query) (client.Page, error) {
 	page := client.Page{Results: []client.Observation{}}
 	sql, args, err := buildSearch(q)
 	if err != nil {
 		return page, fmt.Errorf("%w: %v", ErrBadQuery, err)
 	}
-	rows, err := s.pool.Query(ctx, sql, args...)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return page, err
+	}
+	defer tx.Rollback(ctx)
+	// Server side, so a slow search stops burning a small boid's disk even after the client gives up.
+	if _, err := tx.Exec(ctx, `SET LOCAL statement_timeout = '`+searchTimeout+`'`); err != nil {
+		return page, err
+	}
+	rows, err := tx.Query(ctx, sql, args...)
 	if err != nil {
 		return page, err
 	}
@@ -252,6 +277,48 @@ func (s *Store) Search(ctx context.Context, q client.Query) (client.Page, error)
 		page.Results = append(page.Results, o)
 	}
 	return page, rows.Err()
+}
+
+// SearchTextPending counts observations stored before search_text existed.
+func (s *Store) SearchTextPending(ctx context.Context) (int, error) {
+	var n int
+	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM observations WHERE search_text IS NULL`).Scan(&n)
+	return n, err
+}
+
+// BackfillSearchText fills search_text for older observations in small batches,
+// so a small boid keeps serving while it runs. It returns the rows filled.
+func (s *Store) BackfillSearchText(ctx context.Context) (int, error) {
+	done := 0
+	for {
+		rows, err := s.pool.Query(ctx,
+			`SELECT id, raw, coalesce(cert_names, '{}') FROM observations WHERE search_text IS NULL ORDER BY id LIMIT 500`)
+		if err != nil {
+			return done, err
+		}
+		b := &pgx.Batch{}
+		for rows.Next() {
+			var id int64
+			var raw []byte
+			var names []string
+			if err := rows.Scan(&id, &raw, &names); err != nil {
+				rows.Close()
+				return done, err
+			}
+			b.Queue(`UPDATE observations SET search_text = $2 WHERE id = $1`, id, SearchText(raw, names))
+		}
+		if err := rows.Err(); err != nil {
+			return done, err
+		}
+		if b.Len() == 0 {
+			return done, nil
+		}
+		n, err := execBatch(ctx, s, b)
+		done += n
+		if err != nil {
+			return done, err
+		}
+	}
 }
 
 // Each streams observations in id order, for export.

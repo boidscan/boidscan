@@ -30,11 +30,11 @@ func TestCertInfoNone(t *testing.T) {
 }
 
 func TestBuildSearch(t *testing.T) {
-	sql, args, err := buildSearch(client.Query{CIDR: "192.0.2.0/24", Port: 443, Text: "50%_off", Cert: "Example.org", Limit: 5000})
+	sql, args, err := buildSearch(client.Query{CIDR: "192.0.2.0/24", Port: 443, Text: "50%_OFF", Cert: "Example.org", Limit: 5000})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"ip <<= $1", "port = $2", "ILIKE $3", "cert_sha256 = $4 OR cert_names @> ARRAY[$4]", "LIMIT $5"} {
+	for _, want := range []string{"ip <<= $1", "port = $2", "search_text LIKE $3", "cert_sha256 = $4 OR cert_names @> ARRAY[$4]", "LIMIT $5"} {
 		if !strings.Contains(sql, want) {
 			t.Errorf("sql missing %q: %s", want, sql)
 		}

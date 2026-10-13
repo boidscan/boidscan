@@ -104,13 +104,14 @@ func TestObservationsRoundTrip(t *testing.T) {
 		q    client.Query
 		want int
 	}{
-		"all":         {client.Query{}, 4},
-		"cidr":        {client.Query{CIDR: "192.0.2.2/32"}, 1},
-		"port":        {client.Query{Port: 22}, 2},
-		"text":        {client.Query{Text: "openssh_10"}, 1},
-		"cert by san": {client.Query{Cert: "SHOP.example.org"}, 1},
-		"cert by sha": {client.Query{Cert: "AA11"}, 1},
-		"like escape": {client.Query{Text: "%"}, 0},
+		"all":                {client.Query{}, 4},
+		"cidr":               {client.Query{CIDR: "192.0.2.2/32"}, 1},
+		"port":               {client.Query{Port: 22}, 2},
+		"text":               {client.Query{Text: "openssh_10"}, 1},
+		"text in nul banner": {client.Query{Text: "LOGIN:"}, 1},
+		"cert by san":        {client.Query{Cert: "SHOP.example.org"}, 1},
+		"cert by sha":        {client.Query{Cert: "AA11"}, 1},
+		"like escape":        {client.Query{Text: "%"}, 0},
 	} {
 		page, err := st.Search(ctx, tc.q)
 		if err != nil {
@@ -195,5 +196,32 @@ func TestExclusion(t *testing.T) {
 	}
 	if ok, _ := st.RemoveExclusion(ctx, p); ok {
 		t.Fatal("second remove must report nothing removed")
+	}
+}
+
+func TestBackfillSearchText(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	run, _ := st.StartRun(ctx, testKey.ID(), []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}, []uint16{21}, nil)
+	for _, ip := range []string{"203.0.113.1", "203.0.113.2"} {
+		if err := st.AddObservation(ctx, run, testKey, obs(ip, 21, "ftp21", "ftp", `{"status":"success","result":{"banner":"220 ProFTPD Server"}}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.pool.Exec(ctx, `UPDATE observations SET search_text = NULL`); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := st.SearchTextPending(ctx); err != nil || n != 2 {
+		t.Fatalf("pending = %d, %v; want 2", n, err)
+	}
+	if n, err := st.BackfillSearchText(ctx); err != nil || n != 2 {
+		t.Fatalf("backfilled %d, %v; want 2", n, err)
+	}
+	if n, _ := st.SearchTextPending(ctx); n != 0 {
+		t.Fatalf("pending after backfill = %d", n)
+	}
+	page, err := st.Search(ctx, client.Query{Text: "proftpd"})
+	if err != nil || len(page.Results) != 2 {
+		t.Fatalf("search after backfill = %d results, %v", len(page.Results), err)
 	}
 }

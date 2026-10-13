@@ -49,11 +49,11 @@ func (s *Store) AddRemoteObservations(ctx context.Context, obs []client.Observat
 			shaArg = &sha
 		}
 		b.Queue(
-			`INSERT INTO observations (node_id, ip, port, name, protocol, status, seen_at, cert_sha256, cert_names, raw, signature)
-			 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+			`INSERT INTO observations (node_id, ip, port, name, protocol, status, seen_at, cert_sha256, cert_names, raw, signature, search_text)
+			 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 			 WHERE NOT EXISTS (SELECT 1 FROM exclusions WHERE $2::inet <<= cidr)
 			 ON CONFLICT (signature) DO NOTHING`,
-			o.NodeID, o.IP, o.Port, o.Name, o.Protocol, o.Status, o.SeenAt, shaArg, names, []byte(o.Data), o.Signature)
+			o.NodeID, o.IP, o.Port, o.Name, o.Protocol, o.Status, o.SeenAt, shaArg, names, []byte(o.Data), o.Signature, SearchText(o.Data, names))
 	}
 	return execBatch(ctx, s, b)
 }
