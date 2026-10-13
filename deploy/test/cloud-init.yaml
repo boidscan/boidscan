@@ -44,6 +44,8 @@ write_files:
       services:
         db:
           image: postgres:17.6-bookworm
+          # 25% of a 2 GB box; the 128MB default makes searches flush pages to disk.
+          command: postgres -c shared_buffers=512MB
           environment:
             POSTGRES_USER: boidscan
             POSTGRES_PASSWORD: boidscan
