@@ -14,12 +14,12 @@ write_files:
       ABUSE_CONTACT=
       RATE=10000
       SEEDS=
-      IMAGE=ghcr.io/boidscan/boidscan:0.0.4
+      IMAGE=ghcr.io/boidscan/boidscan:0.0.5
 
   - path: /opt/boidscan/compose.yaml
     content: |
       x-boid: &boid
-        image: ${IMAGE:-ghcr.io/boidscan/boidscan:0.0.4}
+        image: ${IMAGE:-ghcr.io/boidscan/boidscan:0.0.5}
         network_mode: host
         volumes: ["key:/keys"]
         environment:
