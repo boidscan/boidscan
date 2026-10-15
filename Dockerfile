@@ -14,7 +14,8 @@ RUN git clone --depth 1 --branch ${ZMAP_VERSION} https://github.com/zmap/zmap /s
 
 FROM golang:1.27.1-bookworm AS build
 
-ARG ZGRAB2_VERSION=v1.0.0
+# v1.0.0 panics in its rate limiter under load: https://github.com/zmap/zgrab2/pull/787
+ARG ZGRAB2_VERSION=52bee2ab1af9e9a642ba543bfda5f6e4aa4526db
 ARG VERSION=dev
 
 RUN CGO_ENABLED=0 go install github.com/zmap/zgrab2/cmd/zgrab2@${ZGRAB2_VERSION}
