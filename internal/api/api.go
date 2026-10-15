@@ -14,6 +14,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/boidscan/boidscan/internal/fed"
 	"github.com/boidscan/boidscan/internal/netset"
@@ -38,12 +40,20 @@ type Flock interface {
 	Peers(ctx context.Context) ([]fed.Peer, error)
 	// Host merges this node's results with those of the boids holding ip's block.
 	Host(ctx context.Context, ip netip.Addr) (client.Host, error)
+	FlockProgress(ctx context.Context) (fed.FlockProgress, error)
 }
+
+// progressCache is how long a summed progress answer is reused.
+const progressCache = time.Minute
 
 type Server struct {
 	backend  Backend
 	identity policy.Identity
 	flock    Flock
+
+	mu         sync.Mutex
+	progress   *fed.FlockProgress
+	progressAt time.Time
 }
 
 func New(b Backend, id policy.Identity) *Server {
@@ -64,6 +74,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /{$}", s.index)
 	mux.HandleFunc("GET /api/v1/host/{ip}", s.host)
 	mux.HandleFunc("GET /api/v1/search", s.search)
+	mux.HandleFunc("GET /api/v1/progress", s.handleProgress)
 	return mux
 }
 
@@ -72,6 +83,7 @@ type indexData struct {
 	UserAgent string
 	Search    *searchView
 	Flock     *flockView
+	Progress  *fed.FlockProgress
 }
 
 type flockView struct {
@@ -107,6 +119,11 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 				slog.Error("loading peers", "err", err)
 			}
 			d.Flock = &flockView{Self: s.flock.Self(), Peers: peers}
+			if p, err := s.flockProgress(r.Context()); err != nil {
+				slog.Error("summing progress", "err", err)
+			} else {
+				d.Progress = p
+			}
 		}
 		s.render(w, http.StatusOK, d)
 		return
@@ -236,6 +253,35 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, page)
+}
+
+// flockProgress holds the lock while summing, so concurrent requests share one sum.
+func (s *Server) flockProgress(ctx context.Context) (*fed.FlockProgress, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.progress != nil && time.Since(s.progressAt) < progressCache {
+		return s.progress, nil
+	}
+	p, err := s.flock.FlockProgress(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.progress, s.progressAt = &p, time.Now()
+	return s.progress, nil
+}
+
+func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
+	if s.flock == nil {
+		writeError(w, http.StatusNotFound, "this node is not part of a flock")
+		return
+	}
+	p, err := s.flockProgress(r.Context())
+	if err != nil {
+		slog.Error("summing progress", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

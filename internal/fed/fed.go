@@ -123,6 +123,8 @@ type Node struct {
 	// peer that advertises a policy it cannot show is asked only once.
 	fetched    map[string]string
 	urlFetched time.Time
+	// progressLog is the last progress line logged, to log only changes.
+	progressLog string
 }
 
 func New(cfg Config, st Store) (*Node, error) {
@@ -186,6 +188,7 @@ func (n *Node) Run(ctx context.Context) {
 	if n.cfg.Data != nil {
 		go n.replicateLoop(ctx)
 		go n.trustLoop(ctx)
+		go n.progressLoop(ctx)
 	}
 	t := time.NewTicker(n.cfg.Interval)
 	defer t.Stop()
@@ -523,6 +526,7 @@ func (n *Node) Handler() http.Handler {
 		mux.HandleFunc("POST /fed/v1/lease", n.handleLease)
 		mux.HandleFunc("GET /fed/v1/due", n.handleDue)
 		mux.HandleFunc("GET /fed/v1/units", n.handleUnits)
+		mux.HandleFunc("GET /fed/v1/progress", n.handleProgress)
 		mux.HandleFunc("GET /fed/v1/runs", n.handleRuns)
 		mux.HandleFunc("GET /fed/v1/homes", n.handleHomes)
 		mux.HandleFunc("POST /fed/v1/check", n.handleCheck)

@@ -36,10 +36,16 @@ type memData struct {
 	runs     []Run
 	excluded netset.Set
 	trust    memTrust
+	progress map[string]memProgress
+}
+
+type memProgress struct {
+	at time.Time
+	sp SignedProgress
 }
 
 func newMemData(now func() time.Time) *memData {
-	return &memData{now: now, leases: map[catalog.Unit]memLease{}, replicas: map[string]ReplicaState{}}
+	return &memData{now: now, leases: map[catalog.Unit]memLease{}, replicas: map[string]ReplicaState{}, progress: map[string]memProgress{}}
 }
 
 func (m *memData) Host(_ context.Context, ip netip.Addr) (client.Host, error) {
@@ -217,6 +223,51 @@ func (m *memData) RecentRun(_ context.Context, u catalog.Unit, d time.Duration) 
 		}
 	}
 	return false, nil
+}
+
+func (m *memData) HostCounts(_ context.Context, bits int) (map[netip.Prefix]HostCount, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	type port struct {
+		ip   netip.Addr
+		port int
+	}
+	hosts, ports := map[netip.Addr]bool{}, map[port]bool{}
+	out := map[netip.Prefix]HostCount{}
+	for _, o := range m.obs {
+		ip := netip.MustParseAddr(o.IP)
+		b, _ := ip.Prefix(bits)
+		c := out[b]
+		if !hosts[ip] {
+			hosts[ip] = true
+			c.Hosts++
+		}
+		if !ports[port{ip, o.Port}] {
+			ports[port{ip, o.Port}] = true
+			c.OpenPorts++
+		}
+		out[b] = c
+	}
+	return out, nil
+}
+
+func (m *memData) SaveProgress(_ context.Context, id string, at time.Time, sp SignedProgress) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if cur, ok := m.progress[id]; !ok || at.After(cur.at) {
+		m.progress[id] = memProgress{at, sp}
+	}
+	return nil
+}
+
+func (m *memData) Progress(context.Context) ([]SignedProgress, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []SignedProgress
+	for _, p := range m.progress {
+		out = append(out, p.sp)
+	}
+	return out, nil
 }
 
 func (m *memData) has(ip string) bool {

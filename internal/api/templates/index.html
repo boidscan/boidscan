@@ -26,6 +26,7 @@ pre { overflow-x: auto; max-height: 30rem; font-size: .8em; }
 <li>Abuse contact for this node: <code>{{.AbuseContact}}</code></li>
 <li>User agent: <code>{{.UserAgent}}</code></li>
 </ul>
+{{with .Progress}}<p>The flock has scanned {{printf "%.2f" .PercentEver}}% of {{if eq .Catalog "internet"}}the IPv4 internet{{else}}its {{.Catalog}} range{{end}}.</p>{{end}}
 
 <h2>Search</h2>
 <form method="get" action="/">
@@ -80,6 +81,7 @@ pre { overflow-x: auto; max-height: 30rem; font-size: .8em; }
 <ul>
 <li><code>GET /api/v1/host/{ip}</code></li>
 <li><code>GET /api/v1/search?cidr=&amp;port=&amp;q=&amp;cert=&amp;limit=&amp;before=</code></li>
+<li><code>GET /api/v1/progress</code></li>
 <li><code>GET /fed/v1/peers</code></li>
 <li><code>GET /fed/v1/scanners</code></li>
 </ul>
