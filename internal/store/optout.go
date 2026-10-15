@@ -105,10 +105,15 @@ func (s *Store) OptOutsAfter(ctx context.Context, after int64, limit int) ([]fed
 	return collectOptOuts(rows)
 }
 
-func (s *Store) ActiveOptOuts(ctx context.Context) ([]fed.OptOut, error) {
+func (s *Store) ActiveOptOuts(ctx context.Context, after netip.Addr, limit int) ([]fed.OptOut, error) {
+	var from *netip.Addr
+	if after.IsValid() {
+		from = &after
+	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT `+optOutColumns+` FROM (SELECT DISTINCT ON (ip) * FROM optouts ORDER BY ip, signed_at DESC, signature DESC) latest
-		 WHERE action = 'add' AND expires_at > now() ORDER BY ip`)
+		`SELECT `+optOutColumns+` FROM (SELECT DISTINCT ON (ip) * FROM optouts WHERE $1::inet IS NULL OR ip > $1
+		       ORDER BY ip, signed_at DESC, signature DESC) latest
+		 WHERE action = 'add' AND expires_at > now() ORDER BY ip LIMIT $2`, from, limit)
 	if err != nil {
 		return nil, err
 	}

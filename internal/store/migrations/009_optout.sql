@@ -9,7 +9,7 @@ CREATE TABLE optouts (
     signed_at  timestamptz NOT NULL,
     signature  bytea NOT NULL UNIQUE
 );
-CREATE INDEX optouts_ip ON optouts (ip, signed_at DESC);
+CREATE INDEX optouts_ip ON optouts (ip, signed_at DESC, signature DESC);
 CREATE INDEX optouts_signer ON optouts (signer, signed_at);
 CREATE INDEX optouts_signed_at ON optouts (signed_at);
 

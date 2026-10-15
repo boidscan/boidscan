@@ -51,9 +51,12 @@ func TestOptOuts(t *testing.T) {
 	if set, _ := st.RangeExclusions(ctx); set.Len() != 0 {
 		t.Fatal("RangeExclusions holds an opted-out address")
 	}
-	active, err := st.ActiveOptOuts(ctx)
+	active, err := st.ActiveOptOuts(ctx, netip.Addr{}, 10)
 	if err != nil || len(active) != 1 || active[0].IP != ip || !active[0].Verify() {
 		t.Fatalf("ActiveOptOuts = %+v, %v", active, err)
+	}
+	if next, err := st.ActiveOptOuts(ctx, ip, 10); err != nil || len(next) != 0 {
+		t.Fatalf("ActiveOptOuts after the last address = %+v, %v", next, err)
 	}
 	if n, _ := st.OptOutRequests(ctx, other.ID(), ip, now.Add(-time.Hour)); n != 1 {
 		t.Fatalf("OptOutRequests = %d, want 1", n)

@@ -266,7 +266,7 @@ Federation: `ENDPOINT` (the node's `http://<IPv4>` address, empty disables feder
 | `GET /api/v1/host/{ip}` | the latest result per port and module for one address |
 | `GET /api/v1/search?cidr=&port=&q=&cert=&limit=&before=` | results, newest first; `q` is a substring match on the raw result, `cert` matches a SHA-256 fingerprint or hostname, `before` is the `next` value from the previous page |
 | `GET`, `POST`, `DELETE /api/v1/optout` | show, create or renew, and withdraw the opt-out of the address the request comes from |
-| `GET /fed/v1/optouts` | the opt-outs in force, each signed by the boid that took it |
+| `GET /fed/v1/optouts?after=` | the opt-outs in force, each signed by the boid that took it, 1000 per page in address order; pass the last address to get the next page |
 | `GET /fed/v1/peers` | this node's record and the boids it knows, with their state |
 | `GET /fed/v1/scanners` | the scanning addresses of this boid and every boid it has verified, one per line, for firewall block lists |
 | `GET /fed/v1/revoked` | the last known addresses of boids the flock policy has removed, one per line |

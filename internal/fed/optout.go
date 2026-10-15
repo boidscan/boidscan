@@ -25,6 +25,7 @@ const (
 	optOutsPerHour   = 10
 	optOutPage       = 500
 	optOutPages      = 20
+	optOutListPage   = 1000
 	// A peer's opt-out signed by a boid this one does not know yet is retried
 	// for this long, then skipped.
 	optOutWait = time.Hour
@@ -74,8 +75,9 @@ type OptOutData interface {
 	AddOptOuts(ctx context.Context, list []OptOut) (stored, capped int, err error)
 	// OptOutsAfter returns stored attestations in id order.
 	OptOutsAfter(ctx context.Context, after int64, limit int) ([]OptOut, error)
-	// ActiveOptOuts lists the newest attestation of every address that is opted out now.
-	ActiveOptOuts(ctx context.Context) ([]OptOut, error)
+	// ActiveOptOuts lists, in address order, the newest attestation of up to
+	// limit addresses above after that are opted out now. An invalid after starts at the lowest.
+	ActiveOptOuts(ctx context.Context, after netip.Addr, limit int) ([]OptOut, error)
 	LatestOptOut(ctx context.Context, ip netip.Addr) (OptOut, bool, error)
 	// OptOutRequests counts the attestations signer made for ip since the given time.
 	OptOutRequests(ctx context.Context, signer string, ip netip.Addr, since time.Time) (int, error)
@@ -251,9 +253,15 @@ func (n *Node) screenOptOuts(f flock, page []OptOut, after int64) (accept []OptO
 	return accept, next, rejected, false
 }
 
-// handleOptOuts lists the opt-outs in force, for anyone to audit.
+// handleOptOuts lists the opt-outs in force, for anyone to audit, a page at a
+// time: ?after=<last address of the previous page>.
 func (n *Node) handleOptOuts(w http.ResponseWriter, r *http.Request) {
-	list, err := n.cfg.Data.ActiveOptOuts(r.Context())
+	after, _ := netip.ParseAddr(r.URL.Query().Get("after"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > optOutListPage {
+		limit = optOutListPage
+	}
+	list, err := n.cfg.Data.ActiveOptOuts(r.Context(), after, limit)
 	if err != nil {
 		slog.Error("loading opt-outs", "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})

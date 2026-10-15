@@ -86,10 +86,17 @@ func (m *memData) OptOutsAfter(_ context.Context, after int64, limit int) ([]Opt
 	return out, nil
 }
 
-func (m *memData) ActiveOptOuts(context.Context) ([]OptOut, error) {
+func (m *memData) ActiveOptOuts(_ context.Context, after netip.Addr, limit int) ([]OptOut, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.activeOptOuts(), nil
+	var out []OptOut
+	for _, o := range m.activeOptOuts() {
+		if !after.IsValid() || o.IP.Compare(after) > 0 {
+			out = append(out, o)
+		}
+	}
+	slices.SortFunc(out, func(a, b OptOut) int { return a.IP.Compare(b.IP) })
+	return out[:min(limit, len(out))], nil
 }
 
 func (m *memData) LatestOptOut(_ context.Context, ip netip.Addr) (OptOut, bool, error) {
@@ -228,6 +235,9 @@ func TestOptOutsSpread(t *testing.T) {
 	}
 	if len(list) != 1 || list[0].IP != ip || list[0].Signer != a.cfg.Key.ID() || !list[0].Verify() {
 		t.Fatalf("/fed/v1/optouts on boid-c = %+v", list)
+	}
+	if err := call(ctx, c.client, http.MethodGet, c.srv.URL+"/fed/v1/optouts?after="+ip.String(), nil, &list); err != nil || len(list) != 0 {
+		t.Fatalf("/fed/v1/optouts after the last address = %+v, %v", list, err)
 	}
 
 	a.offline.Store(false)
