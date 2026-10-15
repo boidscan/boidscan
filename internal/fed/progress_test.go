@@ -1,8 +1,13 @@
 package fed
 
 import (
+	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
+	"net/netip"
+	"slices"
 	"testing"
 	"time"
 
@@ -10,6 +15,28 @@ import (
 	"github.com/boidscan/boidscan/internal/identity"
 	"github.com/boidscan/boidscan/pkg/client"
 )
+
+// TestHomesMatchRanking checks homes against ranking every member by score,
+// as boids before the faster pick did: boids of both kinds must agree.
+func TestHomesMatchRanking(t *testing.T) {
+	score := func(b netip.Prefix, id string) uint64 {
+		h := sha256.Sum256([]byte(b.String() + "\n" + id))
+		return binary.BigEndian.Uint64(h[:8])
+	}
+	var ids []string
+	for i := range 40 {
+		ids = append(ids, fmt.Sprintf("node-%d", i))
+	}
+	for _, b := range catalog.Default().Blocks(nil)[:2000] {
+		ranked := slices.Clone(ids)
+		slices.SortFunc(ranked, func(x, y string) int {
+			return cmp.Or(cmp.Compare(score(b, y), score(b, x)), cmp.Compare(x, y))
+		})
+		if got := homes(b, ids, 3); !slices.Equal(got, ranked[:3]) {
+			t.Fatalf("homes of %s = %v, want %v", b, got, ranked[:3])
+		}
+	}
+}
 
 func TestFirstHomes(t *testing.T) {
 	var peers []Peer
@@ -20,7 +47,7 @@ func TestFirstHomes(t *testing.T) {
 	blocks := catalog.Default().Blocks(nil)[:2000]
 	first := firstHomes(v, blocks)
 	for _, b := range blocks {
-		if want := v.Homes(b)[0].ID; first[b] != want {
+		if want := homes(b, v.IDs(), 1)[0]; first[b] != want {
 			t.Fatalf("first home of %s is %s, want %s", b, first[b], want)
 		}
 	}

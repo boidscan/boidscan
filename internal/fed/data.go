@@ -227,11 +227,15 @@ func (n *Node) pushTo(ctx context.Context, v View, m Member) error {
 		}
 		st.View = ids
 	}
+	var old *homeTable
+	if st.CatchUp {
+		old = tableFor(st.Old, n.cfg.Catalog.Replicas)
+	}
 	want := func(block netip.Prefix, id, until int64) bool {
 		if !v.IsHome(block, m.ID) {
 			return false
 		}
-		return !st.CatchUp || id > until || !slices.Contains(homes(block, st.Old, n.cfg.Catalog.Replicas), m.ID)
+		return !st.CatchUp || id > until || !slices.Contains(old.homes(block), m.ID)
 	}
 	var sentObs, sentCov int
 	for range batchesPerPush {

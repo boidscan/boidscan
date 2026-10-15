@@ -83,18 +83,13 @@ func (s SignedProgress) Open() (Progress, error) {
 	return p, nil
 }
 
-// firstHomes maps each block to its first home in v, as v.Homes(b)[0] would,
-// without ranking every member.
+// firstHomes maps each block to its first home in v.
 func firstHomes(v View, blocks []netip.Prefix) map[netip.Prefix]string {
 	out := make(map[netip.Prefix]string, len(blocks))
 	for _, b := range blocks {
-		best, top := "", uint64(0)
-		for _, id := range v.ids {
-			if s := score(b, id); best == "" || s > top {
-				best, top = id, s
-			}
+		if h := v.homes(b); len(h) > 0 {
+			out[b] = h[0]
 		}
-		out[b] = best
 	}
 	return out
 }
