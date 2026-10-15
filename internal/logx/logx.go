@@ -11,13 +11,25 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"time"
 )
 
-// Setup installs the default logger. node is added to every debug file record
-// so files from several nodes can be merged.
+const LevelCritical = slog.Level(12)
+
+var levels = []struct {
+	name  string
+	level slog.Level
+}{
+	{"DEBUG", slog.LevelDebug},
+	{"INFO", slog.LevelInfo},
+	{"WARNING", slog.LevelWarn},
+	{"ERROR", slog.LevelError},
+	{"CRITICAL", LevelCritical},
+}
+
+// Setup installs the default logger. node names the boid on every console line
+// and in every debug file record, so files from several nodes can be merged.
 func Setup(console io.Writer, level slog.Level, debugFile, node string) (func() error, error) {
-	handlers := []slog.Handler{NewConsole(console, level)}
+	handlers := []slog.Handler{NewConsole(console, level, node)}
 	closer := func() error { return nil }
 	if debugFile != "" {
 		f, err := os.OpenFile(debugFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
@@ -25,44 +37,90 @@ func Setup(console io.Writer, level slog.Level, debugFile, node string) (func() 
 			return nil, err
 		}
 		closer = f.Close
-		h := slog.NewJSONHandler(f, &slog.HandlerOptions{Level: slog.LevelDebug})
+		h := slog.NewJSONHandler(f, &slog.HandlerOptions{Level: slog.LevelDebug, ReplaceAttr: jsonLevel})
 		handlers = append(handlers, h.WithAttrs([]slog.Attr{slog.String("node", node)}))
 	}
 	slog.SetDefault(slog.New(slog.NewMultiHandler(handlers...)))
 	return closer, nil
 }
 
-func ParseLevel(s string) (slog.Level, error) {
-	var l slog.Level
-	err := l.UnmarshalText([]byte(s))
-	return l, err
+func jsonLevel(groups []string, a slog.Attr) slog.Attr {
+	if len(groups) == 0 && a.Key == slog.LevelKey {
+		if l, ok := a.Value.Any().(slog.Level); ok && l == LevelCritical {
+			a.Value = slog.StringValue("CRITICAL")
+		}
+	}
+	return a
 }
 
-// Console writes "15:04:05 WARN  message key=value".
+// ParseLevel accepts DEBUG, INFO, WARNING (or WARN), ERROR and CRITICAL in any case.
+func ParseLevel(s string) (slog.Level, error) {
+	u := strings.ToUpper(strings.TrimSpace(s))
+	if u == "WARN" {
+		u = "WARNING"
+	}
+	names := make([]string, len(levels))
+	for i, l := range levels {
+		if l.name == u {
+			return l.level, nil
+		}
+		names[i] = l.name
+	}
+	return 0, fmt.Errorf("unknown log level %q, want one of %s", s, strings.Join(names, ", "))
+}
+
+func levelName(l slog.Level) string {
+	for i := len(levels) - 1; i > 0; i-- {
+		if l >= levels[i].level {
+			return levels[i].name
+		}
+	}
+	return levels[0].name
+}
+
+// Console writes "2006-01-02 15:04:05 - wren: message" at INFO and
+// "2006-01-02 15:04:05 - wren [warning]: message" at other levels. Fields
+// follow as key=value only when the console is at DEBUG; otherwise only an
+// "err" field is shown, appended to the message.
 type Console struct {
 	mu    *sync.Mutex
 	w     io.Writer
 	level slog.Level
-	attrs string
+	name  string
+	attrs []slog.Attr
 }
 
-func NewConsole(w io.Writer, level slog.Level) *Console {
-	return &Console{mu: &sync.Mutex{}, w: w, level: level}
+func NewConsole(w io.Writer, level slog.Level, name string) *Console {
+	return &Console{mu: &sync.Mutex{}, w: w, level: level, name: name}
 }
 
 func (c *Console) Enabled(_ context.Context, l slog.Level) bool { return l >= c.level }
 
 func (c *Console) Handle(_ context.Context, r slog.Record) error {
 	var b strings.Builder
-	b.WriteString(r.Time.Format(time.TimeOnly))
-	b.WriteByte(' ')
-	fmt.Fprintf(&b, "%-5s ", r.Level.String())
+	b.WriteString(r.Time.Format("2006-01-02 15:04:05"))
+	b.WriteString(" - ")
+	b.WriteString(c.name)
+	if r.Level != slog.LevelInfo {
+		b.WriteString(" [" + strings.ToLower(levelName(r.Level)) + "]")
+	}
+	b.WriteString(": ")
 	b.WriteString(r.Message)
-	b.WriteString(c.attrs)
-	r.Attrs(func(a slog.Attr) bool {
-		writeAttr(&b, "", a)
+	verbose := c.level <= slog.LevelDebug
+	each := func(a slog.Attr) bool {
+		if verbose {
+			writeAttr(&b, "", a)
+		} else if a.Key == "err" {
+			if v := a.Value.Resolve().String(); v != "" {
+				b.WriteString(": " + v)
+			}
+		}
 		return true
-	})
+	}
+	for _, a := range c.attrs {
+		each(a)
+	}
+	r.Attrs(each)
 	b.WriteByte('\n')
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -71,12 +129,8 @@ func (c *Console) Handle(_ context.Context, r slog.Record) error {
 }
 
 func (c *Console) WithAttrs(attrs []slog.Attr) slog.Handler {
-	var b strings.Builder
-	for _, a := range attrs {
-		writeAttr(&b, "", a)
-	}
 	n := *c
-	n.attrs += b.String()
+	n.attrs = append(append([]slog.Attr(nil), c.attrs...), attrs...)
 	return &n
 }
 

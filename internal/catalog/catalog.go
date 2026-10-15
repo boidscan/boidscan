@@ -36,6 +36,14 @@ type Unit struct {
 
 func (u Unit) String() string { return u.Block.String() + " group " + strconv.Itoa(u.Group) }
 
+// Describe reads "85.12.0.0/16 (core ports)" or "85.12.0.0/16 (extra ports 2)".
+func (u Unit) Describe() string {
+	if u.Group == 0 {
+		return u.Block.String() + " (core ports)"
+	}
+	return u.Block.String() + " (extra ports " + strconv.Itoa(u.Group) + ")"
+}
+
 const groupSize = 256
 
 // Default sweeps all of IPv4 in /16 blocks. Group 0 holds the ports with a

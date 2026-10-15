@@ -255,7 +255,7 @@ Settings come from flags or `BOIDSCAN_*` environment variables: `DB`, `PROJECT_U
 
 Each node signs its results with an Ed25519 key in `KEY_FILE`, created on first start. Its public half is the node ID. `serve` and `scan` must use the same key file.
 
-Federation: `ENDPOINT` (the node's `http://<IPv4>` address, empty disables federation), `SEEDS`, `GOSSIP_INTERVAL`, `LEASE_TTL`, `POLICY_URL` (checked hourly for a newer flock policy), `POLICY_ROOT` (maintainer keys of a separate test flock, `key,key:threshold`), `IDLE` (the worker's wait when nothing is due). `serve` and `worker` must use the same key file and endpoint. Logging: `LOG_LEVEL` (debug, info, warn, error) for the console, and `DEBUG_LOG`, a file that gets every message at debug level as JSON lines.
+Federation: `ENDPOINT` (the node's `http://<IPv4>` address, empty disables federation), `SEEDS`, `GOSSIP_INTERVAL`, `LEASE_TTL`, `POLICY_URL` (checked hourly for a newer flock policy), `POLICY_ROOT` (maintainer keys of a separate test flock, `key,key:threshold`), `IDLE` (the worker's wait when nothing is due). `serve` and `worker` must use the same key file and endpoint. Logging: `LOG_LEVEL` (`DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`; `INFO` by default, `DEBUG` also shows the details of each line) for the console, and `DEBUG_LOG`, a file that gets every message at debug level as JSON lines.
 
 `scan` and `worker` need the `NET_RAW` and `NET_ADMIN` capabilities for ZMap.
 

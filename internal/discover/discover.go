@@ -95,7 +95,7 @@ func Parse(r io.Reader, o Options, p *policy.Policy, out chan<- Hit) error {
 			return fmt.Errorf("unexpected zmap output %q: %w", line, err)
 		}
 		if !wantPort[uint16(port)] || !inTargets(addr, o.Targets) || !p.Allowed(addr) {
-			slog.Warn("dropping out-of-scope zmap result", "addr", addr, "port", port)
+			slog.Warn("dropping out-of-scope zmap result "+addr.String()+":"+portStr, "addr", addr, "port", port)
 			continue
 		}
 		out <- Hit{IP: addr, Port: uint16(port)}

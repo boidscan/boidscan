@@ -381,9 +381,9 @@ func (n *Node) ingest(ctx context.Context, records []Record, via string) {
 		}
 		switch {
 		case isNew && via == r.Label():
-			slog.Info(r.Label()+" introduced itself", "endpoint", r.Endpoint)
+			slog.Info(r.Label()+" introduced itself from "+r.Endpoint, "endpoint", r.Endpoint)
 		case isNew:
-			slog.Info("heard about "+r.Label()+" from "+via, "endpoint", r.Endpoint)
+			slog.Info("heard about "+r.Label()+" at "+r.Endpoint+" from "+via, "endpoint", r.Endpoint)
 		case saved:
 			slog.Debug("fresher record", "peer", r.Label(), "via", via, "time", r.Time)
 		}
@@ -506,7 +506,7 @@ func (n *Node) logFlock(ctx context.Context) {
 	if len(parts) == 0 {
 		parts = []string{"no peers"}
 	}
-	slog.Info("flock: " + strings.Join(parts, ", "))
+	slog.Info("my flock: " + strings.Join(parts, ", "))
 }
 
 func (n *Node) Handler() http.Handler {

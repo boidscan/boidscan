@@ -35,7 +35,7 @@ func (n *Node) loadPolicy(ctx context.Context) {
 	switch {
 	case !changed:
 	case halt != "":
-		slog.Warn("the flock does not sweep with this boid: "+halt, "root", sig.Short(n.rootID))
+		slog.Warn("the flock does not sweep with me: "+halt, "root", sig.Short(n.rootID))
 	default:
 		slog.Info("flock policy "+strconv.FormatUint(st.Serial(), 10)+" is in force", "expires", sig.Time(st.Latest.Expires), "min_rescan", time.Duration(st.Latest.MinRescan).String())
 	}

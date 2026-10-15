@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,7 +73,7 @@ func (s *Sweeper) Run(ctx context.Context) {
 	for ctx.Err() == nil {
 		found, err := s.Step(ctx)
 		if err != nil {
-			slog.Error("sweep", "err", err)
+			slog.Error("sweeping failed", "err", err)
 		}
 		if found {
 			idle = false
@@ -102,7 +103,7 @@ func (s *Sweeper) Step(ctx context.Context) (bool, error) {
 		if halt != "" {
 			slog.Warn("sweep halted: " + halt)
 		} else {
-			slog.Info("sweeping under flock policy "+strconv.FormatUint(st.Serial(), 10), "max_rate", st.Latest.MaxRatePPS, "min_rescan", time.Duration(st.Latest.MinRescan).String())
+			slog.Info("sweeping under flock policy "+strconv.FormatUint(st.Serial(), 10)+" at up to "+strconv.Itoa(st.Latest.MaxRatePPS)+" packets/s, rescanning after "+time.Duration(st.Latest.MinRescan).String(), "max_rate", st.Latest.MaxRatePPS, "min_rescan", time.Duration(st.Latest.MinRescan).String())
 		}
 		s.halt = halt
 	}
@@ -126,7 +127,7 @@ func (s *Sweeper) Step(ctx context.Context) (bool, error) {
 	}
 	excluded.AddSet(netset.Reserved(s.cfg.AllowPrivate))
 	units := dueUnits(s.cfg.Catalog, v, self.ID, status, excluded, minRescan, now, dueLimit)
-	from := "its own blocks"
+	from := "my own blocks"
 	if len(units) == 0 {
 		units, from = s.steal(ctx, v)
 	}
@@ -144,7 +145,7 @@ func (s *Sweeper) Step(ctx context.Context) (bool, error) {
 			s.request(ctx, u, granted, true)
 			continue
 		}
-		slog.Info("leased "+u.String()+" from "+from, "homes", labels(granted))
+		slog.Info("claimed "+u.Describe()+" from "+from+", homes "+strings.Join(names(granted), ", "), "unit", u.String(), "homes", labels(granted))
 		return true, s.work(ctx, u, granted, ttl, st.Latest.MaxRatePPS)
 	}
 	return false, nil
@@ -219,7 +220,7 @@ func (s *Sweeper) work(ctx context.Context, u catalog.Unit, homes []Member, ttl 
 				return
 			case <-t.C:
 				if renewed, _ := s.request(ctx, u, homes, false); len(renewed)*2 <= len(homes) {
-					slog.Warn("could not renew the lease on "+u.String()+"; another boid may scan it too", "renewed", len(renewed), "homes", len(homes))
+					slog.Warn("could not renew my claim on "+u.Describe()+"; another boid may scan it too", "renewed", len(renewed), "homes", len(homes))
 				}
 			}
 		}
@@ -237,8 +238,29 @@ func (s *Sweeper) work(ctx context.Context, u catalog.Unit, homes []Member, ttl 
 	if _, err := s.store.AddCoverage(ctx, []Coverage{SignCoverage(s.cfg.Key, u, s.hash, start)}); err != nil {
 		return err
 	}
-	slog.Info("scanned "+u.String(), "took", s.now().Sub(start).Truncate(time.Millisecond).String())
+	took := s.now().Sub(start)
+	if took >= time.Second {
+		took = took.Round(time.Second)
+	} else {
+		took = took.Round(time.Millisecond)
+	}
+	slog.Info("finished "+u.Describe()+" in "+took.String(), "unit", u.String())
 	return nil
+}
+
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return strconv.Itoa(n) + " " + noun + "s"
+}
+
+func names(ms []Member) []string {
+	out := make([]string, len(ms))
+	for i, m := range ms {
+		out[i] = m.Name
+	}
+	return out
 }
 
 func labels(ms []Member) []string {

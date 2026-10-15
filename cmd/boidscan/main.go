@@ -82,7 +82,7 @@ func main() {
 		if errors.Is(err, flag.ErrHelp) {
 			os.Exit(2)
 		}
-		slog.Error(os.Args[1]+" failed", "err", err)
+		slog.Log(ctx, logx.LevelCritical, os.Args[1]+" failed", "err", err)
 		closeLog()
 		os.Exit(1)
 	}
@@ -394,7 +394,7 @@ func cmdWorker(ctx context.Context, args []string) error {
 			return err
 		},
 	}, st)
-	slog.Info("sweeping with catalog "+cat.Name, "id", key.ID())
+	slog.Info("starting to sweep the "+cat.Name+" catalog", "id", key.ID())
 	sw.Run(ctx)
 	return nil
 }
@@ -483,7 +483,7 @@ func cmdServe(ctx context.Context, args []string) error {
 		mux.Handle("/fed/", node.Handler())
 		go node.Run(ctx)
 	} else {
-		slog.Info("federation disabled: no endpoint configured", "id", key.ID())
+		slog.Info("no endpoint is configured, so I work alone without a flock", "id", key.ID())
 	}
 
 	srv := &http.Server{
@@ -499,7 +499,7 @@ func cmdServe(ctx context.Context, args []string) error {
 		defer cancel()
 		srv.Shutdown(shutdownCtx)
 	}()
-	slog.Info("serving", "addr", *listen)
+	slog.Info("serving the web page and API on " + *listen)
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
@@ -515,16 +515,16 @@ func backfillSearchText(ctx context.Context, st *store.Store) {
 	if pending == 0 {
 		return
 	}
-	slog.Info("filling search text for older observations; text search misses them until done", "rows", pending)
+	slog.Info("filling search text for " + strconv.Itoa(pending) + " older results; text search misses them until I am done")
 	start := time.Now()
 	n, err := st.BackfillSearchText(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
-			slog.Error("filling search text", "err", err, "rows", n)
+			slog.Error("filling search text stopped after "+strconv.Itoa(n)+" results", "err", err)
 		}
 		return
 	}
-	slog.Info("filled search text", "rows", n, "took", time.Since(start).Round(time.Second))
+	slog.Info("filled search text for " + strconv.Itoa(n) + " results in " + time.Since(start).Round(time.Second).String())
 }
 
 func cmdExport(ctx context.Context, args []string) error {
@@ -543,7 +543,7 @@ func cmdExport(ctx context.Context, args []string) error {
 	}
 	defer st.Close()
 	n, err := export.IVRE(ctx, st, os.Stdout)
-	slog.Info("exported", "records", n)
+	slog.Info("exported " + strconv.Itoa(n) + " records")
 	return err
 }
 
@@ -587,7 +587,7 @@ func cmdExclude(ctx context.Context, args []string) error {
 			return err
 		}
 		n, err := st.PurgeRange(ctx, p)
-		slog.Info("exclusion added; stored results in the range deleted", "prefix", p, "purged", n)
+		slog.Info("excluded " + p.String() + " and deleted the " + strconv.FormatInt(n, 10) + " results I had stored in it")
 		return err
 	default:
 		return errors.New("usage: boidscan exclude add|rm|list [CIDR]")

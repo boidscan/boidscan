@@ -362,7 +362,8 @@ func (n *Node) decide(ctx context.Context, f flock, s Sample, votes []Vote) {
 	if v != VerdictPass && v != VerdictInconclusive {
 		level = slog.LevelInfo
 	}
-	slog.Log(ctx, level, "checked a "+s.Kind+" of "+label+": "+v, "target", s.Target.IP.String()+":"+strconv.Itoa(int(s.Target.Port))+" "+s.Target.Name, "votes", len(votes))
+	target := s.Target.IP.String() + ":" + strconv.Itoa(int(s.Target.Port)) + " " + s.Target.Name
+	slog.Log(ctx, level, "checked a "+s.Kind+" of "+label+" on "+target+": "+v, "target", target, "votes", len(votes))
 	n.reassess(ctx, f, s.Scanner, label)
 }
 

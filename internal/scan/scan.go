@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/boidscan/boidscan/internal/catalog"
@@ -58,11 +60,31 @@ func Run(ctx context.Context, st *store.Store, key fed.Signer, pol *policy.Polic
 	if err != nil {
 		return res, err
 	}
-	slog.Info("scan started", "run", res.RunID, "targets", job.Targets, "ports", len(plan.Ports()), "rate", pol.Rate)
+	targets := make([]string, len(job.Targets))
+	for i, t := range job.Targets {
+		targets[i] = t.String()
+	}
+	what := strings.Join(targets, ", ")
+	if job.Unit != nil {
+		what = job.Unit.Describe()
+	}
+	slog.Info("scanning "+what+" on "+strconv.Itoa(len(plan.Ports()))+" ports at "+strconv.Itoa(pol.Rate)+" packets/s", "run", res.RunID)
 
 	scanCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	found := make(chan discover.Hit, 1024)
 	hits := make(chan discover.Hit, 1024)
+	go func() {
+		defer close(hits)
+		n := 0
+		for h := range found {
+			n++
+			hits <- h
+		}
+		if scanCtx.Err() == nil {
+			slog.Info("found "+strconv.Itoa(n)+" open ports in "+what, "run", res.RunID)
+		}
+	}()
 	obs := make(chan grab.Observation, 1024)
 	discErr := make(chan error, 1)
 	grabErr := make(chan error, 1)
@@ -77,7 +99,7 @@ func Run(ctx context.Context, st *store.Store, key fed.Signer, pol *policy.Polic
 			GatewayMAC: tools.GatewayMAC,
 			IPLayer:    tools.IPLayer,
 			Cooldown:   tools.Cooldown,
-		}, pol, hits)
+		}, pol, found)
 	}()
 	go func() {
 		grabErr <- grab.Run(scanCtx, tools.ZGrab2, plan, pol, blocklist, hits, obs)
@@ -116,6 +138,8 @@ func Run(ctx context.Context, st *store.Store, key fed.Signer, pol *policy.Polic
 	if err := st.FinishRun(finishCtx, res.RunID, runErr); err != nil {
 		slog.Error("recording run result", "err", err)
 	}
-	slog.Info("scan finished", "run", res.RunID, "observations", res.Stored, "successful", res.Success)
+	if runErr == nil {
+		slog.Info("done with run "+strconv.FormatInt(res.RunID, 10)+": "+strconv.Itoa(res.Success)+" of "+strconv.Itoa(res.Stored)+" handshakes answered", "run", res.RunID)
+	}
 	return res, runErr
 }

@@ -31,6 +31,7 @@ x-boid-env: &boid-env
   BOIDSCAN_POLICY_ROOT: ${LAB_POLICY_ROOT:-}
   BOIDSCAN_POLICY_URL: ""
   BOIDSCAN_LEASE_TTL: 30s
+  BOIDSCAN_LOG_LEVEL: ${BOIDSCAN_LOG_LEVEL:-INFO}
 
 # A worker shares its boid's network namespace, so it scans from the boid's endpoint address.
 x-worker: &worker

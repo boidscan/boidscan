@@ -289,7 +289,7 @@ func Run(ctx context.Context, binary string, plan *Plan, p *policy.Policy, block
 		defer w.Flush()
 		for h := range hits {
 			if !p.Allowed(h.IP) {
-				slog.Warn("exclusion check rejected host before grab", "addr", h.IP)
+				slog.Warn("not grabbing "+h.IP.String()+": it is excluded", "addr", h.IP)
 				continue
 			}
 			for _, svc := range plan.For(h.Port) {

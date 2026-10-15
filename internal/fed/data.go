@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -277,7 +278,14 @@ func (n *Node) pushTo(ctx context.Context, v View, m Member) error {
 		}
 	}
 	if sentObs+sentCov > 0 {
-		slog.Info("pushed "+strconv.Itoa(sentObs)+" results and "+strconv.Itoa(sentCov)+" coverage records to "+m.Label(), "home", m.Endpoint)
+		var sent []string
+		if sentObs > 0 {
+			sent = append(sent, plural(sentObs, "result"))
+		}
+		if sentCov > 0 {
+			sent = append(sent, plural(sentCov, "coverage record"))
+		}
+		slog.Info("sent "+strings.Join(sent, " and ")+" to "+m.Label(), "home", m.Endpoint)
 	}
 	return n.cfg.Data.SaveReplicaState(ctx, m.ID, st)
 }
@@ -357,7 +365,7 @@ func (n *Node) handlePush(w http.ResponseWriter, r *http.Request) {
 		from = p.Label()
 	}
 	if res.Rejected > 0 {
-		slog.Warn("rejected pushed rows: bad signature, reserved address, wrong catalog, or a scanner this boid does not accept", "rejected", res.Rejected, "from", from)
+		slog.Warn("rejected "+strconv.Itoa(res.Rejected)+" rows pushed by "+from+": bad signature, reserved address, wrong catalog, or a scanner I do not accept", "rejected", res.Rejected, "from", from)
 	}
 	slog.Debug("push received", "from", from, "observations", len(msg.Observations), "coverage", len(msg.Coverage), "stored", stored, "retry", res.Retry)
 	n.sampleRows(ctx, f, obs, cov)
