@@ -36,7 +36,7 @@ On your machine, in an empty folder:
 
 ```sh
 mkdir -p testflock
-boidscan() { docker run --rm -u "$(id -u)" -v "$PWD/testflock:/policy" ghcr.io/boidscan/boidscan:0.0.6 "$@"; }
+boidscan() { docker run --rm -u "$(id -u)" -v "$PWD/testflock:/policy" ghcr.io/boidscan/boidscan:0.0.7 "$@"; }
 
 ROOT="$(boidscan policy keygen -out /policy/maintainer.key):1"
 boidscan policy new -test-range $RANGE -policy-root $ROOT -out /policy/1.json
@@ -59,7 +59,7 @@ RANGE=$RANGE
 ROOT=$ROOT
 SEEDS=http://$SEED
 ABUSE_CONTACT=abuse@your.domain
-IMAGE=ghcr.io/boidscan/boidscan:0.0.6
+IMAGE=ghcr.io/boidscan/boidscan:0.0.7
 EOF
 
 for h in "${IPS[@]}"; do
