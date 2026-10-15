@@ -97,12 +97,26 @@ func (s *Store) AddOptOuts(ctx context.Context, list []fed.OptOut) (stored, capp
 	return stored, capped, tx.Commit(ctx)
 }
 
-func (s *Store) OptOutsAfter(ctx context.Context, after int64, limit int) ([]fed.OptOut, error) {
-	rows, err := s.pool.Query(ctx, `SELECT `+optOutColumns+` FROM optouts WHERE id > $1 ORDER BY id LIMIT $2`, after, limit)
+func (s *Store) OptOutsBy(ctx context.Context, signer string, from time.Time, limit int) ([]fed.OptOut, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+optOutColumns+` FROM optouts WHERE signer = $1 AND signed_at >= $2
+		ORDER BY signed_at, signature LIMIT $3`, signer, from, limit)
 	if err != nil {
 		return nil, err
 	}
 	return collectOptOuts(rows)
+}
+
+// OptOutHeads walks the signer index one signer at a time instead of grouping every row.
+func (s *Store) OptOutHeads(ctx context.Context) ([]fed.OptOutHead, error) {
+	rows, err := s.pool.Query(ctx, `WITH RECURSIVE s AS (
+			SELECT min(signer) AS signer FROM optouts
+			UNION ALL
+			SELECT (SELECT min(signer) FROM optouts WHERE signer > s.signer) FROM s WHERE s.signer IS NOT NULL)
+		SELECT signer, (SELECT max(signed_at) FROM optouts o WHERE o.signer = s.signer) FROM s WHERE signer IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[fed.OptOutHead])
 }
 
 func (s *Store) ActiveOptOuts(ctx context.Context, after netip.Addr, limit int) ([]fed.OptOut, error) {
@@ -135,17 +149,17 @@ func (s *Store) OptOutRequests(ctx context.Context, signer string, ip netip.Addr
 	return n, err
 }
 
-func (s *Store) OptOutCursor(ctx context.Context, peer string) (int64, error) {
-	var after int64
-	err := s.pool.QueryRow(ctx, `SELECT after FROM optout_cursors WHERE peer_id = $1`, peer).Scan(&after)
+func (s *Store) OptOutCursor(ctx context.Context, signer string) (time.Time, error) {
+	var after time.Time
+	err := s.pool.QueryRow(ctx, `SELECT after FROM optout_cursors WHERE signer = $1`, signer).Scan(&after)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, nil
+		return time.Time{}, nil
 	}
 	return after, err
 }
 
-func (s *Store) SaveOptOutCursor(ctx context.Context, peer string, after int64) error {
+func (s *Store) SaveOptOutCursor(ctx context.Context, signer string, after time.Time) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO optout_cursors (peer_id, after) VALUES ($1, $2) ON CONFLICT (peer_id) DO UPDATE SET after = EXCLUDED.after`, peer, after)
+		`INSERT INTO optout_cursors (signer, after) VALUES ($1, $2) ON CONFLICT (signer) DO UPDATE SET after = EXCLUDED.after`, signer, after)
 	return err
 }

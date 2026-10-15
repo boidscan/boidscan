@@ -13,8 +13,8 @@ CREATE INDEX optouts_ip ON optouts (ip, signed_at DESC, signature DESC);
 CREATE INDEX optouts_signer ON optouts (signer, signed_at);
 CREATE INDEX optouts_signed_at ON optouts (signed_at);
 
--- How far this boid has read each peer's opt-out log.
+-- The newest attestation of each signer this boid has read from peers.
 CREATE TABLE optout_cursors (
-    peer_id text PRIMARY KEY,
-    after   bigint NOT NULL
+    signer text PRIMARY KEY,
+    after  timestamptz NOT NULL
 );

@@ -27,19 +27,20 @@ type memLease struct {
 
 // memData keeps a boid's results in memory, with the semantics of the Postgres store.
 type memData struct {
-	mu       sync.Mutex
-	now      func() time.Time
-	obs      []client.Observation
-	cov      []Coverage
-	leases   map[catalog.Unit]memLease
-	replicas map[string]ReplicaState
-	runs     []Run
-	excluded netset.Set
-	trust    memTrust
-	optOuts  []OptOut
-	cursors  map[string]int64
-	optOutID int64
-	progress map[string]memProgress
+	mu          sync.Mutex
+	now         func() time.Time
+	obs         []client.Observation
+	cov         []Coverage
+	leases      map[catalog.Unit]memLease
+	replicas    map[string]ReplicaState
+	runs        []Run
+	excluded    netset.Set
+	trust       memTrust
+	optOuts     []OptOut
+	cursors     map[string]time.Time
+	optOutReads int
+	optOutID    int64
+	progress    map[string]memProgress
 }
 
 type memProgress struct {
@@ -48,7 +49,7 @@ type memProgress struct {
 }
 
 func newMemData(now func() time.Time) *memData {
-	return &memData{now: now, leases: map[catalog.Unit]memLease{}, replicas: map[string]ReplicaState{}, progress: map[string]memProgress{}, cursors: map[string]int64{}}
+	return &memData{now: now, leases: map[catalog.Unit]memLease{}, replicas: map[string]ReplicaState{}, progress: map[string]memProgress{}, cursors: map[string]time.Time{}}
 }
 
 func (m *memData) Host(_ context.Context, ip netip.Addr) (client.Host, error) {

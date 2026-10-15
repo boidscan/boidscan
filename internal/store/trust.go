@@ -153,7 +153,8 @@ func (s *Store) DropShunned(ctx context.Context, id string) error {
 		     (SELECT 1 FROM samples s WHERE s.subject = o.signature AND s.verdict IN ('pass', 'change'))`,
 		`DELETE FROM coverage WHERE node_id = $1`,
 		`DELETE FROM leases WHERE holder = $1`,
-		`DELETE FROM optouts WHERE signer = $1`)
+		`DELETE FROM optouts WHERE signer = $1`,
+		`DELETE FROM optout_cursors WHERE signer = $1`)
 }
 
 func (s *Store) DropCoverage(ctx context.Context, id string) error {

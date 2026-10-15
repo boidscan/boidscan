@@ -133,6 +133,7 @@ func (m *memData) DropShunned(_ context.Context, id string) error {
 	m.obs = slices.DeleteFunc(m.obs, func(o client.Observation) bool { return o.NodeID == id && !m.confirmed(o) })
 	m.dropCoverage(id)
 	m.optOuts = slices.DeleteFunc(m.optOuts, func(o OptOut) bool { return o.Signer == id })
+	delete(m.cursors, id)
 	return nil
 }
 

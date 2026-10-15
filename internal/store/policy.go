@@ -147,6 +147,7 @@ func (s *Store) SyncRevoked(ctx context.Context, ids []string, self string) erro
 		`DELETE FROM coverage WHERE node_id = ANY($1) AND node_id <> $2`,
 		`DELETE FROM leases WHERE holder = ANY($1)`,
 		`DELETE FROM optouts WHERE signer = ANY($1) AND signer <> $2`,
+		`DELETE FROM optout_cursors WHERE signer = ANY($1) AND signer <> $2`,
 	} {
 		args := []any{ids}
 		if strings.Contains(q, "$2") {

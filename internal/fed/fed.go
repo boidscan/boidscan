@@ -532,6 +532,7 @@ func (n *Node) Handler() http.Handler {
 		mux.HandleFunc("POST /fed/v1/check", n.handleCheck)
 		mux.HandleFunc("GET /fed/v1/check/{key}", n.handleCheckResult)
 		mux.HandleFunc("GET /fed/v1/optouts", n.handleOptOuts)
+		mux.HandleFunc("GET /fed/v1/optouts/heads", n.handleOptOutHeads)
 		mux.HandleFunc("GET /fed/v1/optouts/log", n.handleOptOutLog)
 	}
 	return mux

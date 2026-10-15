@@ -2,6 +2,7 @@ package fed
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"net/http"
@@ -74,14 +75,32 @@ func (m *memData) AddOptOuts(_ context.Context, list []OptOut) (int, int, error)
 	return stored, capped, nil
 }
 
-func (m *memData) OptOutsAfter(_ context.Context, after int64, limit int) ([]OptOut, error) {
+func (m *memData) OptOutsBy(_ context.Context, signer string, from time.Time, limit int) ([]OptOut, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.optOutReads++
 	var out []OptOut
 	for _, o := range m.optOuts {
-		if o.ID > after && len(out) < limit {
+		if o.Signer == signer && !o.Time.Before(from) {
 			out = append(out, o)
 		}
+	}
+	slices.SortFunc(out, func(a, b OptOut) int { return cmp.Or(a.Time.Compare(b.Time), bytes.Compare(a.Signature, b.Signature)) })
+	return out[:min(limit, len(out))], nil
+}
+
+func (m *memData) OptOutHeads(context.Context) ([]OptOutHead, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	latest := map[string]time.Time{}
+	for _, o := range m.optOuts {
+		if o.Time.After(latest[o.Signer]) {
+			latest[o.Signer] = o.Time
+		}
+	}
+	var out []OptOutHead
+	for s, t := range latest {
+		out = append(out, OptOutHead{Signer: s, Latest: t})
 	}
 	return out, nil
 }
@@ -118,16 +137,16 @@ func (m *memData) OptOutRequests(_ context.Context, signer string, ip netip.Addr
 	return n, nil
 }
 
-func (m *memData) OptOutCursor(_ context.Context, peer string) (int64, error) {
+func (m *memData) OptOutCursor(_ context.Context, signer string) (time.Time, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.cursors[peer], nil
+	return m.cursors[signer], nil
 }
 
-func (m *memData) SaveOptOutCursor(_ context.Context, peer string, after int64) error {
+func (m *memData) SaveOptOutCursor(_ context.Context, signer string, after time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.cursors[peer] = after
+	m.cursors[signer] = after
 	return nil
 }
 
@@ -261,49 +280,74 @@ func resign(k Signer, o OptOut) OptOut {
 }
 
 func TestScreenOptOuts(t *testing.T) {
+	signer, _ := identity.Generate()
+	other, _ := identity.Generate()
+	ip := netip.MustParseAddr("192.0.2.80")
+	now := time.Now()
+
+	good := SignOptOut(signer, ip, OptOutAdd, now)
+	tooLong := good
+	tooLong.Expires = now.Add(MaxOptOutAge + time.Hour)
+	future := SignOptOut(signer, ip, OptOutAdd, now.Add(time.Hour))
+	forged := good
+	forged.IP = netip.MustParseAddr("192.0.2.81")
+	expired := SignOptOut(signer, ip, OptOutAdd, now.Add(-MaxOptOutAge-time.Hour))
+	page := []OptOut{good, resign(signer, tooLong), future, forged, expired, SignOptOut(other, ip, OptOutAdd, now)}
+	accept, rejected := screenOptOuts(now, signer.ID(), page)
+	if len(accept) != 1 || !bytes.Equal(accept[0].Signature, good.Signature) || rejected != 4 {
+		t.Fatalf("screen = %d accepted, %d rejected; want 1, 4", len(accept), rejected)
+	}
+}
+
+// TestOptOutsReadOnce: a boid reads each signer's attestations once, not
+// again from every peer, and skips signers it does not accept until it does.
+func TestOptOutsReadOnce(t *testing.T) {
 	clk := &clock{t: time.Now()}
 	a := newDataBoid(t, "boid-a", clk)
 	b := newDataBoid(t, "boid-b", clk, a.srv.URL)
-	rounds([]*testBoid{a, b}, 2)
+	c := newDataBoid(t, "boid-c", clk, a.srv.URL)
+	boids := []*testBoid{a, b, c}
+	rounds(boids, 2)
 	ctx := context.Background()
-	f, err := a.view(ctx)
+	desk := newTestDesk(a.cfg.Key, a.data, clk)
+	for i := range 3 {
+		if _, err := desk.Request(ctx, netip.AddrFrom4([4]byte{172, 30, 1, byte(i)}), OptOutAdd); err != nil {
+			t.Fatal(err)
+		}
+		clk.advance(time.Second)
+	}
+	b.SyncOptOuts(ctx)
+	f, err := c.view(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	stranger, _ := identity.Generate()
-	ip := netip.MustParseAddr("192.0.2.80")
-	now := clk.now()
-	withID := func(o OptOut, id int64) OptOut {
-		o.ID = id
-		return o
-	}
-
-	good := SignOptOut(b.cfg.Key, ip, OptOutAdd, now)
-	tooLong := good
-	tooLong.Expires = now.Add(MaxOptOutAge + time.Hour)
-	future := SignOptOut(b.cfg.Key, ip, OptOutAdd, now.Add(time.Hour))
-	forged := good
-	forged.IP = netip.MustParseAddr("192.0.2.81")
-	expired := SignOptOut(b.cfg.Key, ip, OptOutAdd, now.Add(-MaxOptOutAge-time.Hour))
-	page := []OptOut{
-		withID(good, 1), withID(resign(b.cfg.Key, tooLong), 2), withID(future, 3), withID(forged, 4), withID(expired, 5),
-		withID(SignOptOut(stranger, ip, OptOutAdd, now), 6), withID(good, 7),
-	}
-	accept, next, rejected, wait := a.screenOptOuts(f, page, 0)
-	if len(accept) != 1 || !bytes.Equal(accept[0].Signature, good.Signature) || next != 5 || rejected != 3 || !wait {
-		t.Fatalf("screen = %d accepted, next %d, %d rejected, wait %v; want 1, 5, 3, true", len(accept), next, rejected, wait)
-	}
-
-	old := withID(SignOptOut(stranger, ip, OptOutAdd, now.Add(-optOutWait-time.Minute)), 8)
-	if accept, next, rejected, wait := a.screenOptOuts(f, []OptOut{old}, 7); len(accept) != 0 || next != 8 || rejected != 0 || wait {
-		t.Fatalf("an old opt-out by an unknown boid: %d accepted, next %d, %d rejected, wait %v", len(accept), next, rejected, wait)
-	}
-
-	a.data.SetTrust(ctx, b.cfg.Key.ID(), TrustShunned, false)
-	if f, err = a.view(ctx); err != nil {
+	if err := c.pullOptOuts(ctx, f, f.peers[a.cfg.Key.ID()]); err != nil {
 		t.Fatal(err)
 	}
-	if accept, _, rejected, _ := a.screenOptOuts(f, []OptOut{withID(good, 9)}, 8); len(accept) != 0 || rejected != 1 {
-		t.Fatal("an opt-out signed by a shunned boid was accepted")
+	if cur, _ := c.data.OptOutCursor(ctx, a.cfg.Key.ID()); !cur.Equal(clk.now().Add(-time.Second).UTC().Truncate(time.Microsecond)) {
+		t.Fatalf("cursor for boid-a = %v", cur)
+	}
+	if n := len(c.data.optOuts); n != 3 {
+		t.Fatalf("boid-c holds %d opt-outs, want 3", n)
+	}
+	// boid-b holds the same attestations; reading it must not fetch them again.
+	b.data.optOutReads = 0
+	if err := c.pullOptOuts(ctx, f, f.peers[b.cfg.Key.ID()]); err != nil {
+		t.Fatal(err)
+	}
+	if b.data.optOutReads != 0 {
+		t.Fatalf("boid-c read boid-b's log %d times for attestations it already had", b.data.optOutReads)
+	}
+
+	c.data.SetTrust(ctx, a.cfg.Key.ID(), TrustShunned, false)
+	c.data.DropShunned(ctx, a.cfg.Key.ID())
+	if f, err = c.view(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.pullOptOuts(ctx, f, f.peers[b.cfg.Key.ID()]); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(c.data.activeOptOuts()); n != 0 {
+		t.Fatalf("boid-c took %d opt-outs signed by a shunned boid", n)
 	}
 }

@@ -73,9 +73,21 @@ func TestOptOuts(t *testing.T) {
 	if err != nil || !ok || latest.Action != fed.OptOutRemove {
 		t.Fatalf("LatestOptOut = %+v, %v, %v", latest, ok, err)
 	}
-	log, err := st.OptOutsAfter(ctx, 0, 10)
-	if err != nil || len(log) != 2 || log[0].ID >= log[1].ID {
-		t.Fatalf("OptOutsAfter = %+v, %v", log, err)
+	log, err := st.OptOutsBy(ctx, testKey.ID(), time.Time{}, 10)
+	if err != nil || len(log) != 1 || log[0].Action != fed.OptOutRemove {
+		t.Fatalf("OptOutsBy = %+v, %v", log, err)
+	}
+	if log, _ := st.OptOutsBy(ctx, testKey.ID(), remove.Time.Add(time.Microsecond), 10); len(log) != 0 {
+		t.Fatalf("OptOutsBy after the newest = %+v", log)
+	}
+	heads, err := st.OptOutHeads(ctx)
+	if err != nil || len(heads) != 2 {
+		t.Fatalf("OptOutHeads = %+v, %v", heads, err)
+	}
+	for _, h := range heads {
+		if h.Signer == testKey.ID() && !h.Latest.Equal(remove.Time) {
+			t.Fatalf("OptOutHeads gives %v for %s, want %v", h.Latest, h.Signer, remove.Time)
+		}
 	}
 
 	// The withdrawal goes with its revoked signer, so the opt-out applies again.
@@ -92,11 +104,11 @@ func TestOptOuts(t *testing.T) {
 		t.Fatal("a shunned boid's opt-out still counts")
 	}
 
-	if err := st.SaveOptOutCursor(ctx, other.ID(), 42); err != nil {
+	if err := st.SaveOptOutCursor(ctx, other.ID(), now); err != nil {
 		t.Fatal(err)
 	}
-	if after, err := st.OptOutCursor(ctx, other.ID()); err != nil || after != 42 {
-		t.Fatalf("OptOutCursor = %d, %v", after, err)
+	if after, err := st.OptOutCursor(ctx, other.ID()); err != nil || !after.Equal(now) {
+		t.Fatalf("OptOutCursor = %v, %v", after, err)
 	}
 }
 

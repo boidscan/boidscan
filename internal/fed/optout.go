@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -26,9 +27,9 @@ const (
 	optOutPage       = 500
 	optOutPages      = 20
 	optOutListPage   = 1000
-	// A peer's opt-out signed by a boid this one does not know yet is retried
-	// for this long, then skipped.
-	optOutWait = time.Hour
+	// Each read of a signer starts this far before its newest attestation
+	// already read, in case its clock stepped back.
+	optOutReread = time.Hour
 )
 
 // OptOut is a boid's signed statement that the host at IP asked, from that
@@ -73,16 +74,24 @@ type OptOutData interface {
 	// MaxOptOutsPerDay per signer and UTC day, and deletes stored results for
 	// addresses that are opted out afterwards. capped counts the ones over the limit.
 	AddOptOuts(ctx context.Context, list []OptOut) (stored, capped int, err error)
-	// OptOutsAfter returns stored attestations in id order.
-	OptOutsAfter(ctx context.Context, after int64, limit int) ([]OptOut, error)
+	// OptOutsBy returns signer's stored attestations signed at or after from, oldest first.
+	OptOutsBy(ctx context.Context, signer string, from time.Time, limit int) ([]OptOut, error)
+	// OptOutHeads gives the newest stored attestation time of every signer.
+	OptOutHeads(ctx context.Context) ([]OptOutHead, error)
 	// ActiveOptOuts lists, in address order, the newest attestation of up to
 	// limit addresses above after that are opted out now. An invalid after starts at the lowest.
 	ActiveOptOuts(ctx context.Context, after netip.Addr, limit int) ([]OptOut, error)
 	LatestOptOut(ctx context.Context, ip netip.Addr) (OptOut, bool, error)
 	// OptOutRequests counts the attestations signer made for ip since the given time.
 	OptOutRequests(ctx context.Context, signer string, ip netip.Addr, since time.Time) (int, error)
-	OptOutCursor(ctx context.Context, peer string) (int64, error)
-	SaveOptOutCursor(ctx context.Context, peer string, after int64) error
+	// OptOutCursor is the newest attestation time of signer read from peers so far.
+	OptOutCursor(ctx context.Context, signer string) (time.Time, error)
+	SaveOptOutCursor(ctx context.Context, signer string, after time.Time) error
+}
+
+type OptOutHead struct {
+	Signer string    `json:"signer"`
+	Latest time.Time `json:"latest"`
 }
 
 var (
@@ -151,7 +160,8 @@ func (d *OptOutDesk) Request(ctx context.Context, ip netip.Addr, action string) 
 }
 
 // SyncOptOuts reads the opt-out logs of a few peers. Every boid passes on
-// what it accepted, so an opt-out reaches the whole flock like gossip.
+// what it accepted, so an opt-out reaches the whole flock like gossip. Reads
+// go by signer, so an attestation is fetched once, from whichever peer has it first.
 func (n *Node) SyncOptOuts(ctx context.Context) {
 	f, err := n.view(ctx)
 	if err != nil {
@@ -173,31 +183,58 @@ func (n *Node) SyncOptOuts(ctx context.Context) {
 }
 
 func (n *Node) pullOptOuts(ctx context.Context, f flock, p Peer) error {
-	after, err := n.cfg.Data.OptOutCursor(ctx, p.ID)
-	if err != nil {
-		return err
+	var heads []OptOutHead
+	if err := n.call(ctx, http.MethodGet, p.Endpoint+"/fed/v1/optouts/heads", nil, &heads); err != nil {
+		slog.Debug("reading opt-outs failed", "peer", p.Label(), "err", err)
+		return nil
 	}
 	var stored, capped, rejected int
-	for range optOutPages {
-		var page []OptOut
-		if err := n.call(ctx, http.MethodGet, p.Endpoint+"/fed/v1/optouts/log?after="+strconv.FormatInt(after, 10), nil, &page); err != nil {
-			slog.Debug("reading opt-outs failed", "peer", p.Label(), "err", err)
+	pages := optOutPages
+	for _, h := range heads {
+		if pages == 0 {
 			break
 		}
-		accept, next, bad, wait := n.screenOptOuts(f, page, after)
-		s, c, err := n.cfg.Data.AddOptOuts(ctx, accept)
+		if s, known := f.peers[h.Signer]; h.Signer == f.self || !known || !s.Verified || f.rejects(h.Signer) {
+			continue
+		}
+		cursor, err := n.cfg.Data.OptOutCursor(ctx, h.Signer)
 		if err != nil {
 			return err
 		}
-		stored, capped, rejected = stored+s, capped+c, rejected+bad
-		if next != after {
-			if err := n.cfg.Data.SaveOptOutCursor(ctx, p.ID, next); err != nil {
+		if !h.Latest.After(cursor) {
+			continue
+		}
+		from := cursor
+		if !from.IsZero() {
+			from = from.Add(-optOutReread)
+		}
+		for ; pages > 0; pages-- {
+			var page []OptOut
+			q := url.Values{"signer": {h.Signer}, "from": {from.Format(time.RFC3339Nano)}}
+			if err := n.call(ctx, http.MethodGet, p.Endpoint+"/fed/v1/optouts/log?"+q.Encode(), nil, &page); err != nil {
+				slog.Debug("reading opt-outs failed", "peer", p.Label(), "err", err)
+				break
+			}
+			accept, bad := screenOptOuts(n.now(), h.Signer, page)
+			s, c, err := n.cfg.Data.AddOptOuts(ctx, accept)
+			if err != nil {
 				return err
 			}
-			after = next
-		}
-		if wait || len(page) < optOutPage {
-			break
+			stored, capped, rejected = stored+s, capped+c, rejected+bad
+			if len(page) == 0 {
+				break
+			}
+			last := page[len(page)-1].Time
+			if last.After(cursor) {
+				if err := n.cfg.Data.SaveOptOutCursor(ctx, h.Signer, last); err != nil {
+					return err
+				}
+				cursor = last
+			}
+			if len(page) < optOutPage || !last.After(from) {
+				break
+			}
+			from = last
 		}
 	}
 	if stored > 0 {
@@ -207,7 +244,7 @@ func (n *Node) pullOptOuts(ctx context.Context, f flock, p Peer) error {
 		slog.Warn("I refused " + optOutCount(capped) + " from " + p.Label() + " signed by a boid that signed more than " + strconv.Itoa(MaxOptOutsPerDay) + " in one day")
 	}
 	if rejected > 0 {
-		slog.Warn("I refused " + optOutCount(rejected) + " from " + p.Label() + ": bad signature, invalid, or signed by a boid I do not accept")
+		slog.Warn("I refused " + optOutCount(rejected) + " from " + p.Label() + ": bad signature, invalid, or not signed by the boid asked for")
 	}
 	return nil
 }
@@ -219,38 +256,18 @@ func optOutCount(n int) string {
 	return strconv.Itoa(n) + " opt-outs"
 }
 
-// screenOptOuts picks the attestations of a page to store and the cursor to
-// continue from. It stops early, with wait set, at a recent attestation
-// signed by a boid this one has not verified yet.
-func (n *Node) screenOptOuts(f flock, page []OptOut, after int64) (accept []OptOut, next int64, rejected int, wait bool) {
-	now := n.now()
-	next = after
+// screenOptOuts picks the attestations of a page of signer's log to store.
+// Expired ones are skipped without counting as rejected.
+func screenOptOuts(now time.Time, signer string, page []OptOut) (accept []OptOut, rejected int) {
 	for _, o := range page {
-		if o.ID <= next {
-			continue
-		}
-		p, known := f.peers[o.Signer]
 		switch {
-		case o.Signer == f.self:
-		case f.rejects(o.Signer):
-			rejected++
-			next = o.ID
-			continue
-		case (!known || !p.Verified) && now.Sub(o.Time) < optOutWait:
-			return accept, next, rejected, true
-		case !known || !p.Verified:
-			next = o.ID
-			continue
-		}
-		next = o.ID
-		switch {
-		case !o.valid(now) || !o.Verify():
+		case o.Signer != signer || !o.valid(now) || !o.Verify():
 			rejected++
 		case o.Expires.After(now):
 			accept = append(accept, o)
 		}
 	}
-	return accept, next, rejected, false
+	return accept, rejected
 }
 
 // handleOptOuts lists the opt-outs in force, for anyone to audit, a page at a
@@ -273,10 +290,31 @@ func (n *Node) handleOptOuts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, list)
 }
 
-// handleOptOutLog returns stored attestations after ?after= in id order, for other boids to copy.
+func (n *Node) handleOptOutHeads(w http.ResponseWriter, r *http.Request) {
+	heads, err := n.cfg.Data.OptOutHeads(r.Context())
+	if err != nil {
+		slog.Error("loading opt-outs", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	if heads == nil {
+		heads = []OptOutHead{}
+	}
+	writeJSON(w, http.StatusOK, heads)
+}
+
+// handleOptOutLog returns ?signer='s stored attestations signed at or after ?from=, oldest first.
 func (n *Node) handleOptOutLog(w http.ResponseWriter, r *http.Request) {
-	after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
-	list, err := n.cfg.Data.OptOutsAfter(r.Context(), after, optOutPage)
+	var from time.Time
+	if v := r.URL.Query().Get("from"); v != "" {
+		t, err := time.Parse(time.RFC3339Nano, v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "want ?from=<RFC 3339 time>"})
+			return
+		}
+		from = t
+	}
+	list, err := n.cfg.Data.OptOutsBy(r.Context(), r.URL.Query().Get("signer"), from, optOutPage)
 	if err != nil {
 		slog.Error("loading opt-outs", "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
