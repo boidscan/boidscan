@@ -177,7 +177,7 @@ func saveObservation(ctx context.Context, tx pgx.Tx, runID *int64, o client.Obse
 			curID, runID, o.Protocol, o.Status, o.SeenAt, shaArg, names, []byte(o.Data), o.Signature, SearchText(o.Data, names))
 		return err == nil, err
 	case found && !o.SeenAt.After(curSeen):
-		tag, err := tx.Exec(ctx, `UPDATE observations SET first_seen_at = least(first_seen_at, $5)
+		tag, err := tx.Exec(ctx, `UPDATE observations SET first_seen_at = least(coalesce(first_seen_at, seen_at), $5)
 			WHERE ip = $1 AND port = $2 AND name = $3 AND node_id = $4 AND change_key = $6`,
 			o.IP, int32(o.Port), o.Name, o.NodeID, o.SeenAt, key)
 		if err != nil || tag.RowsAffected() > 0 {
@@ -185,13 +185,13 @@ func saveObservation(ctx context.Context, tx pgx.Tx, runID *int64, o client.Obse
 		}
 	}
 	_, err = tx.Exec(ctx,
-		`INSERT INTO observations (run_id, node_id, ip, port, name, protocol, status, first_seen_at, seen_at, cert_sha256, cert_names, raw, signature, search_text, change_key)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10, $11, $12, $13, $14)`,
+		`INSERT INTO observations (run_id, node_id, ip, port, name, protocol, status, first_seen_at, seen_at, cert_sha256, cert_names, raw, signature, search_text, change_key, seq)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10, $11, $12, $13, $14, nextval('observations_seq'))`,
 		runID, o.NodeID, o.IP, int32(o.Port), o.Name, o.Protocol, o.Status, o.SeenAt, shaArg, names, []byte(o.Data), o.Signature, SearchText(o.Data, names), key)
 	return err == nil, err
 }
 
-const obsColumns = `id, coalesce(run_id, 0), node_id, host(ip), port, name, protocol, status, first_seen_at, seen_at, coalesce(cert_sha256, ''), coalesce(cert_names, '{}'), raw, signature, seq`
+const obsColumns = `id, coalesce(run_id, 0), node_id, host(ip), port, name, protocol, status, coalesce(first_seen_at, seen_at), seen_at, coalesce(cert_sha256, ''), coalesce(cert_names, '{}'), raw, signature, coalesce(seq, id)`
 
 func scanObservation(row pgx.Row) (client.Observation, error) {
 	var o client.Observation

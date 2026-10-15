@@ -217,3 +217,32 @@ func TestObservationVersions(t *testing.T) {
 		t.Fatalf("this boid's own repeated result: %d rows, want 3", len(got))
 	}
 }
+
+// TestRowsBeforeVersions: rows stored before migration 011 have no seq or
+// first_seen_at; they replicate first and read as seen once.
+func TestRowsBeforeVersions(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	other, _ := identity.Generate()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	old := remoteObs(other, "198.51.100.6", now.Add(-time.Hour))
+	if _, err := st.pool.Exec(ctx, `INSERT INTO observations (node_id, ip, port, name, protocol, status, seen_at, raw, signature)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, old.NodeID, old.IP, old.Port, old.Name, old.Protocol, old.Status, old.SeenAt, []byte(old.Data), old.Signature); err != nil {
+		t.Fatal(err)
+	}
+	// As migration 011 does on a table that already has rows.
+	st.pool.Exec(ctx, `SELECT setval('observations_seq', (SELECT max(id) + 1 FROM observations), false)`)
+	st.AddRemoteObservations(ctx, []client.Observation{remoteObs(other, "198.51.100.7", now)})
+	got, err := st.ObservationsAfter(ctx, 0, 10)
+	if err != nil || len(got) != 2 || got[0].IP != "198.51.100.6" || got[0].Seq != got[0].ID || !got[0].FirstSeenAt.Equal(got[0].SeenAt) || got[1].Seq <= got[0].Seq {
+		t.Fatalf("ObservationsAfter = %+v, %v", got, err)
+	}
+	if more, _ := st.ObservationsAfter(ctx, got[0].Seq, 10); len(more) != 1 || more[0].IP != "198.51.100.7" {
+		t.Fatalf("after the old row: %+v", more)
+	}
+	// Seen again, the old row starts a version of its own: it has no change key.
+	st.AddRemoteObservations(ctx, []client.Observation{remoteObs(other, "198.51.100.6", now)})
+	if more, _ := st.ObservationsAfter(ctx, got[1].Seq, 10); len(more) != 1 || more[0].IP != "198.51.100.6" {
+		t.Fatalf("after a new sighting of the old row: %+v", more)
+	}
+}

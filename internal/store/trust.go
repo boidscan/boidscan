@@ -117,7 +117,7 @@ func (s *Store) CoverageEvidence(ctx context.Context, u catalog.Unit, ports []ui
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+obsColumns+` FROM observations
 		 WHERE ip <<= $1 AND port = ANY($2) AND status = 'success' AND node_id <> $3 AND signature IS NOT NULL
-		   AND seen_at >= $4 AND first_seen_at < $5
+		   AND seen_at >= $4 AND coalesce(first_seen_at, seen_at) < $5
 		 ORDER BY seen_at DESC LIMIT $6`,
 		u.Block, ps, scanner, since, before, limit)
 	if err != nil {
@@ -152,7 +152,7 @@ func (s *Store) DropShunned(ctx context.Context, id string) error {
 	return s.execTx(ctx, []any{id},
 		`DELETE FROM observations o WHERE node_id = $1 AND NOT EXISTS
 		     (SELECT 1 FROM samples s WHERE s.verdict IN ('pass', 'change') AND s.scanner = o.node_id AND s.ip = o.ip
-		     AND s.port = o.port AND s.name = o.name AND s.scanned_at BETWEEN o.first_seen_at AND o.seen_at)`,
+		     AND s.port = o.port AND s.name = o.name AND s.scanned_at BETWEEN coalesce(o.first_seen_at, o.seen_at) AND o.seen_at)`,
 		`DELETE FROM coverage WHERE node_id = $1`,
 		`DELETE FROM unit_latest WHERE node_id = $1`,
 		refillUnitLatest,

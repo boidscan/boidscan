@@ -21,7 +21,11 @@ func (s *Store) Excluded(ctx context.Context, ip netip.Addr) (bool, error) {
 
 func (s *Store) ObservationsAfter(ctx context.Context, after int64, limit int) ([]client.Observation, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT `+obsColumns+` FROM observations WHERE seq > $1 AND signature IS NOT NULL ORDER BY seq LIMIT $2`, after, limit)
+		// Rows from before migration 011 have no seq and come first: seq starts above their ids.
+		`(SELECT `+obsColumns+` FROM observations WHERE seq IS NULL AND id > $1 AND signature IS NOT NULL ORDER BY id LIMIT $2)
+		 UNION ALL
+		 (SELECT `+obsColumns+` FROM observations WHERE seq > $1 AND signature IS NOT NULL ORDER BY seq LIMIT $2)
+		 ORDER BY 15 LIMIT $2`, after, limit)
 	if err != nil {
 		return nil, err
 	}
