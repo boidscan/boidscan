@@ -1,3 +1,6 @@
 dist/
 deploy/lab/logs/
 deploy/lab/policy/
+*.tar.gz
+*.tar
+*.zip
