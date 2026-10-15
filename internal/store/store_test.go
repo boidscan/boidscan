@@ -182,9 +182,15 @@ func TestExclusion(t *testing.T) {
 		t.Fatalf("unexpected results after exclusion: %+v", page.Results)
 	}
 
-	set, err := st.ExclusionSet(ctx)
+	set, err := st.ExclusionSet(ctx, []netip.Prefix{netip.MustParsePrefix("198.51.0.0/16")})
 	if err != nil || !set.Contains(netip.MustParseAddr("198.51.100.9")) {
 		t.Fatalf("ExclusionSet = %v, %v", set, err)
+	}
+	if set, _ := st.ExclusionSet(ctx, []netip.Prefix{netip.MustParsePrefix("198.51.100.128/25")}); set.Len() != 0 {
+		t.Fatalf("ExclusionSet holds exclusions outside the scanned range: %v", set.Prefixes())
+	}
+	if set, _ := st.RangeExclusions(ctx); !set.Contains(netip.MustParseAddr("198.51.100.9")) {
+		t.Fatalf("RangeExclusions = %v", set.Prefixes())
 	}
 	list, _ := st.Exclusions(ctx)
 	if len(list) != 1 || list[0].Prefix != p || list[0].Note != "hoster forbids it" {

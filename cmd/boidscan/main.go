@@ -197,9 +197,9 @@ func (f *scanFlags) register(fs *flag.FlagSet) {
 	fs.IntVar(&f.tools.Cooldown, "cooldown", 0, "seconds zmap waits for late replies (default: zmap's 8)")
 }
 
-// policy loads the exclusions afresh, so ranges added while a worker runs apply to its next unit.
-func (f *scanFlags) policy(ctx context.Context, st *store.Store, id policy.Identity, lab bool) (*policy.Policy, error) {
-	exclusions, err := st.ExclusionSet(ctx)
+// policy loads the exclusions inside targets afresh, so ranges added while a worker runs apply to its next unit.
+func (f *scanFlags) policy(ctx context.Context, st *store.Store, id policy.Identity, lab bool, targets []netip.Prefix) (*policy.Policy, error) {
+	exclusions, err := st.ExclusionSet(ctx, targets)
 	if err != nil {
 		return nil, fmt.Errorf("loading exclusions: %w", err)
 	}
@@ -253,7 +253,7 @@ func cmdScan(ctx context.Context, args []string) error {
 	}
 	defer st.Close()
 
-	pol, err := sf.policy(ctx, st, c.id, *lab)
+	pol, err := sf.policy(ctx, st, c.id, *lab, targets)
 	if err != nil {
 		return err
 	}
@@ -386,7 +386,7 @@ func cmdWorker(ctx context.Context, args []string) error {
 			if limited.rate <= 0 || limited.rate > maxRate {
 				limited.rate = maxRate
 			}
-			pol, err := limited.policy(ctx, st, c.id, ff.lab)
+			pol, err := limited.policy(ctx, st, c.id, ff.lab, []netip.Prefix{u.Block})
 			if err != nil {
 				return err
 			}
@@ -466,7 +466,11 @@ func cmdServe(ctx context.Context, args []string) error {
 			Trust:        trust,
 			Forge:        ff.forge,
 			Check: func(ctx context.Context, targets []fed.CheckTarget) ([]fed.CheckResult, error) {
-				exclusions, err := st.ExclusionSet(ctx)
+				within := make([]netip.Prefix, len(targets))
+				for i, t := range targets {
+					within[i] = netip.PrefixFrom(t.IP.Unmap(), t.IP.Unmap().BitLen())
+				}
+				exclusions, err := st.ExclusionSet(ctx, within)
 				if err != nil {
 					return nil, err
 				}

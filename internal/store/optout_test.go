@@ -42,8 +42,14 @@ func TestOptOuts(t *testing.T) {
 	if ex, _ := st.Excluded(ctx, ip); !ex {
 		t.Fatal("Excluded misses an opted-out address")
 	}
-	if set, _ := st.ExclusionSet(ctx); !set.Contains(ip) || set.Contains(netip.MustParseAddr("192.0.2.8")) {
+	if set, _ := st.ExclusionSet(ctx, []netip.Prefix{netip.MustParsePrefix("192.0.0.0/16")}); !set.Contains(ip) || set.Contains(netip.MustParseAddr("192.0.2.8")) {
 		t.Fatal("ExclusionSet must hold exactly the opted-out address")
+	}
+	if set, _ := st.ExclusionSet(ctx, []netip.Prefix{netip.MustParsePrefix("198.51.0.0/16")}); set.Len() != 0 {
+		t.Fatal("ExclusionSet holds an opt-out outside the scanned range")
+	}
+	if set, _ := st.RangeExclusions(ctx); set.Len() != 0 {
+		t.Fatal("RangeExclusions holds an opted-out address")
 	}
 	active, err := st.ActiveOptOuts(ctx)
 	if err != nil || len(active) != 1 || active[0].IP != ip || !active[0].Verify() {

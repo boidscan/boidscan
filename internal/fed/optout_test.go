@@ -162,7 +162,7 @@ func TestOptOutDesk(t *testing.T) {
 	if _, active, _ := desk.Status(ctx, ip); !active {
 		t.Error("status does not show the opt-out")
 	}
-	if set, _ := d.ExclusionSet(ctx); !set.Contains(ip) {
+	if set, _ := d.ExclusionSet(ctx, []netip.Prefix{netip.PrefixFrom(ip, 16).Masked()}); !set.Contains(ip) {
 		t.Error("the exclusion set misses the opt-out")
 	}
 

@@ -79,13 +79,29 @@ func (m *memData) Excluded(_ context.Context, ip netip.Addr) (bool, error) {
 	return m.excluded.Contains(ip) || m.optedOut(ip), nil
 }
 
-func (m *memData) ExclusionSet(context.Context) (*netset.Set, error) {
+func (m *memData) RangeExclusions(context.Context) (*netset.Set, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s := &netset.Set{}
 	s.AddSet(&m.excluded)
-	for _, o := range m.activeOptOuts() {
-		s.Add(netip.PrefixFrom(o.IP, 32))
+	return s, nil
+}
+
+func (m *memData) ExclusionSet(_ context.Context, within []netip.Prefix) (*netset.Set, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s := &netset.Set{}
+	for _, w := range within {
+		for _, p := range m.excluded.Prefixes() {
+			if p.Overlaps(w) {
+				s.Add(p)
+			}
+		}
+		for _, o := range m.activeOptOuts() {
+			if w.Contains(o.IP) {
+				s.Add(netip.PrefixFrom(o.IP, 32))
+			}
+		}
 	}
 	return s, nil
 }

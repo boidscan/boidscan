@@ -23,7 +23,8 @@ type SweepStore interface {
 	AddCoverage(ctx context.Context, cov []Coverage) (int, error)
 	// RecentRun reports whether this boid finished u within the last d.
 	RecentRun(ctx context.Context, u catalog.Unit, d time.Duration) (bool, error)
-	ExclusionSet(ctx context.Context) (*netset.Set, error)
+	// RangeExclusions leaves out opted-out addresses: they never cover a whole block.
+	RangeExclusions(ctx context.Context) (*netset.Set, error)
 	PolicyState(ctx context.Context) (flockpolicy.State, error)
 }
 
@@ -121,12 +122,11 @@ func (s *Sweeper) Step(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	all, err := s.store.ExclusionSet(ctx)
+	all, err := s.store.RangeExclusions(ctx)
 	if err != nil {
 		return false, err
 	}
-	// Only prefixes as large as a block can skip one; leaving out the many
-	// single-address opt-outs keeps listing the catalog's blocks fast.
+	// Only prefixes as large as a block can skip one.
 	excluded := &netset.Set{}
 	for _, p := range all.Prefixes() {
 		if p.Bits() <= s.cfg.Catalog.BlockBits {

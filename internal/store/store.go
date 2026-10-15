@@ -375,8 +375,8 @@ func (s *Store) Exclusions(ctx context.Context) ([]Exclusion, error) {
 	return out, rows.Err()
 }
 
-// ExclusionSet holds the operator's exclusions and the opted-out addresses.
-func (s *Store) ExclusionSet(ctx context.Context) (*netset.Set, error) {
+// RangeExclusions holds the operator's exclusions without the opted-out addresses.
+func (s *Store) RangeExclusions(ctx context.Context) (*netset.Set, error) {
 	list, err := s.Exclusions(ctx)
 	if err != nil {
 		return nil, err
@@ -385,12 +385,29 @@ func (s *Store) ExclusionSet(ctx context.Context) (*netset.Set, error) {
 	for _, e := range list {
 		set.Add(e.Prefix)
 	}
-	optOuts, err := s.ActiveOptOuts(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for _, o := range optOuts {
-		set.Add(netip.PrefixFrom(o.IP, 32))
+	return set, nil
+}
+
+// ExclusionSet holds the operator's exclusions and the opted-out addresses
+// that overlap within, so a scan only carries the entries it can hit.
+func (s *Store) ExclusionSet(ctx context.Context, within []netip.Prefix) (*netset.Set, error) {
+	set := &netset.Set{}
+	for _, w := range within {
+		rows, err := s.pool.Query(ctx, `SELECT cidr FROM exclusions WHERE cidr && $1
+			UNION ALL
+			SELECT set_masklen(ip, 32) FROM (SELECT DISTINCT ON (ip) ip, action, expires_at FROM optouts
+				WHERE ip <<= $1 ORDER BY ip, signed_at DESC, signature DESC) latest
+			WHERE action = 'add' AND expires_at > now()`, w.Masked())
+		if err != nil {
+			return nil, err
+		}
+		prefixes, err := pgx.CollectRows(rows, pgx.RowTo[netip.Prefix])
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range prefixes {
+			set.Add(p)
+		}
 	}
 	return set, nil
 }
