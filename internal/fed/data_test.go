@@ -250,7 +250,7 @@ func (m *memData) RecentRun(_ context.Context, u catalog.Unit, d time.Duration) 
 	return false, nil
 }
 
-func (m *memData) HostCounts(_ context.Context, bits int) (map[netip.Prefix]HostCount, error) {
+func (m *memData) HostCounts(_ context.Context, blocks []netip.Prefix) (map[netip.Prefix]HostCount, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	type port struct {
@@ -261,7 +261,11 @@ func (m *memData) HostCounts(_ context.Context, bits int) (map[netip.Prefix]Host
 	out := map[netip.Prefix]HostCount{}
 	for _, o := range m.obs {
 		ip := netip.MustParseAddr(o.IP)
-		b, _ := ip.Prefix(bits)
+		i := slices.IndexFunc(blocks, func(b netip.Prefix) bool { return b.Contains(ip) })
+		if i < 0 {
+			continue
+		}
+		b := blocks[i]
 		c := out[b]
 		if !hosts[ip] {
 			hosts[ip] = true

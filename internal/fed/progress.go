@@ -22,8 +22,9 @@ import (
 
 const (
 	// progressEvery is how many gossip intervals pass between progress counts.
-	progressEvery = 10
-	maxScanning   = 256
+	progressEvery  = 10
+	maxScanning    = 256
+	hostCountEvery = time.Hour
 )
 
 // Progress is one boid's count of the units whose block it is the first home
@@ -188,7 +189,7 @@ func (n *Node) ownProgress(ctx context.Context, f flock) (Progress, error) {
 			p.Scanning = append(p.Scanning, Lease{Unit: s.Unit, Holder: s.LeasedBy})
 		}
 	}
-	counts, err := n.cfg.Data.HostCounts(ctx, cat.BlockBits)
+	counts, err := n.hostCounts(ctx, mine)
 	if err != nil {
 		return Progress{}, err
 	}
@@ -199,6 +200,25 @@ func (n *Node) ownProgress(ctx context.Context, f flock) (Progress, error) {
 		}
 	}
 	return p, nil
+}
+
+// hostCounts reads every stored result in blocks, so it is redone at most
+// every hostCountEvery; blocks gained in between count once it is.
+func (n *Node) hostCounts(ctx context.Context, blocks []netip.Prefix) (map[netip.Prefix]HostCount, error) {
+	n.mu.Lock()
+	counts, at := n.hostCountCache, n.hostCountAt
+	n.mu.Unlock()
+	if counts != nil && n.now().Sub(at) < hostCountEvery {
+		return counts, nil
+	}
+	counts, err := n.cfg.Data.HostCounts(ctx, blocks)
+	if err != nil {
+		return nil, err
+	}
+	n.mu.Lock()
+	n.hostCountCache, n.hostCountAt = counts, n.now()
+	n.mu.Unlock()
+	return counts, nil
 }
 
 func (n *Node) fetchProgress(ctx context.Context, m Member) {

@@ -38,14 +38,11 @@ func TestProgress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	counts, err := st.HostCounts(ctx, 24)
+	counts, err := st.HostCounts(ctx, []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24"), netip.MustParsePrefix("203.0.113.0/24")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c := counts[netip.MustParsePrefix("192.0.2.0/24")]; c.Hosts != 1 || c.OpenPorts != 2 {
-		t.Fatalf("192.0.2.0/24: %+v, want 1 host with 2 open ports", c)
-	}
-	if c := counts[netip.MustParsePrefix("198.51.100.0/24")]; c.Hosts != 1 || c.OpenPorts != 1 || len(counts) != 2 {
-		t.Fatalf("HostCounts = %+v", counts)
+	if c := counts[netip.MustParsePrefix("192.0.2.0/24")]; c.Hosts != 1 || c.OpenPorts != 2 || len(counts) != 1 {
+		t.Fatalf("HostCounts = %+v, want only 192.0.2.0/24 with 1 host and 2 open ports", counts)
 	}
 }

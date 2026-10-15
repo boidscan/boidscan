@@ -42,8 +42,8 @@ type Data interface {
 	// UnitStatus lists the units of blocks that have coverage or an unexpired lease.
 	UnitStatus(ctx context.Context, blocks []netip.Prefix) ([]UnitStatus, error)
 	SweepRuns(ctx context.Context, limit int) ([]Run, error)
-	// HostCounts counts the hosts and open ports stored per block of bits.
-	HostCounts(ctx context.Context, bits int) (map[netip.Prefix]HostCount, error)
+	// HostCounts counts the hosts and open ports stored in each of blocks.
+	HostCounts(ctx context.Context, blocks []netip.Prefix) (map[netip.Prefix]HostCount, error)
 	// SaveProgress keeps the count of nodeID unless a newer one is stored.
 	SaveProgress(ctx context.Context, nodeID string, at time.Time, p SignedProgress) error
 	Progress(ctx context.Context) ([]SignedProgress, error)

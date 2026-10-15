@@ -124,7 +124,9 @@ type Node struct {
 	fetched    map[string]string
 	urlFetched time.Time
 	// progressLog is the last progress line logged, to log only changes.
-	progressLog string
+	progressLog    string
+	hostCountCache map[netip.Prefix]HostCount
+	hostCountAt    time.Time
 }
 
 func New(cfg Config, st Store) (*Node, error) {

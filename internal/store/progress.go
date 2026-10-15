@@ -8,10 +8,10 @@ import (
 	"github.com/boidscan/boidscan/internal/fed"
 )
 
-func (s *Store) HostCounts(ctx context.Context, bits int) (map[netip.Prefix]fed.HostCount, error) {
+func (s *Store) HostCounts(ctx context.Context, blocks []netip.Prefix) (map[netip.Prefix]fed.HostCount, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT network(set_masklen(ip, $1)), count(DISTINCT ip), count(*)
-		 FROM (SELECT DISTINCT ip, port FROM observations) o GROUP BY 1`, bits)
+		`SELECT b, count(DISTINCT ip), count(*)
+		 FROM (SELECT DISTINCT b, o.ip, o.port FROM unnest($1::cidr[]) b JOIN observations o ON o.ip <<= b) x GROUP BY b`, blocks)
 	if err != nil {
 		return nil, err
 	}
