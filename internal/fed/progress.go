@@ -158,7 +158,13 @@ func (n *Node) ownProgress(ctx context.Context, f flock) (Progress, error) {
 	if f.state.Latest != nil {
 		minRescan = time.Duration(f.state.Latest.MinRescan)
 	}
-	status, err := n.cfg.Data.UnitStatus(ctx)
+	var mine []netip.Prefix
+	for b, id := range first {
+		if id == self {
+			mine = append(mine, b)
+		}
+	}
+	status, err := n.cfg.Data.UnitStatus(ctx, mine)
 	if err != nil {
 		return Progress{}, err
 	}

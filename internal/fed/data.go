@@ -39,8 +39,8 @@ type Data interface {
 	// unexpired one or the unit was scanned within minRescan.
 	AcquireLease(ctx context.Context, u catalog.Unit, holder string, ttl, minRescan time.Duration) (bool, error)
 	ReleaseLease(ctx context.Context, u catalog.Unit, holder string) error
-	// UnitStatus lists units with coverage or an unexpired lease.
-	UnitStatus(ctx context.Context) ([]UnitStatus, error)
+	// UnitStatus lists the units of blocks that have coverage or an unexpired lease.
+	UnitStatus(ctx context.Context, blocks []netip.Prefix) ([]UnitStatus, error)
 	SweepRuns(ctx context.Context, limit int) ([]Run, error)
 	// HostCounts counts the hosts and open ports stored per block of bits.
 	HostCounts(ctx context.Context, bits int) (map[netip.Prefix]HostCount, error)
@@ -532,7 +532,19 @@ func (n *Node) handleLease(w http.ResponseWriter, r *http.Request) {
 
 // dueUnits are the stalest units id holds that are not leased and were not
 // scanned within minRescan. Never-scanned units come first, group 0 before group 1.
-func dueUnits(cat catalog.Catalog, v View, id string, status []UnitStatus, skip *netset.Set, minRescan time.Duration, now time.Time, limit int) []catalog.Unit {
+// heldBlocks lists the blocks of cat outside skip that id holds in v.
+func heldBlocks(cat catalog.Catalog, v View, id string, skip *netset.Set) []netip.Prefix {
+	var out []netip.Prefix
+	for _, b := range cat.Blocks(skip) {
+		if v.IsHome(b, id) {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// dueUnits picks the stalest units of the held blocks.
+func dueUnits(cat catalog.Catalog, held []netip.Prefix, status []UnitStatus, minRescan time.Duration, now time.Time, limit int) []catalog.Unit {
 	last := map[catalog.Unit]time.Time{}
 	leased := map[catalog.Unit]bool{}
 	for _, s := range status {
@@ -548,13 +560,10 @@ func dueUnits(cat catalog.Catalog, v View, id string, status []UnitStatus, skip 
 		t time.Time
 	}
 	var cands []cand
-	blocks := cat.Blocks(skip)
+	blocks := slices.Clone(held)
 	// Boids holding the same block should not all reach for the same unit.
 	rand.Shuffle(len(blocks), func(i, j int) { blocks[i], blocks[j] = blocks[j], blocks[i] })
 	for _, b := range blocks {
-		if !v.IsHome(b, id) {
-			continue
-		}
 		for g := range cat.Groups {
 			u := catalog.Unit{Block: b, Group: g}
 			t := last[u]
@@ -588,13 +597,14 @@ func (n *Node) handleDue(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, []catalog.Unit{})
 		return
 	}
-	status, err := n.cfg.Data.UnitStatus(ctx)
+	held := heldBlocks(n.cfg.Catalog, f.View, n.cfg.Key.ID(), netset.Reserved(n.cfg.AllowPrivate))
+	status, err := n.cfg.Data.UnitStatus(ctx, held)
 	if err != nil {
 		slog.Error("loading unit status", "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	units := dueUnits(n.cfg.Catalog, f.View, n.cfg.Key.ID(), status, netset.Reserved(n.cfg.AllowPrivate), time.Duration(f.state.Latest.MinRescan), n.now(), limit)
+	units := dueUnits(n.cfg.Catalog, held, status, time.Duration(f.state.Latest.MinRescan), n.now(), limit)
 	writeJSON(w, http.StatusOK, units)
 }
 
@@ -607,19 +617,16 @@ func (n *Node) handleUnits(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	status, err := n.cfg.Data.UnitStatus(ctx)
+	status, err := n.cfg.Data.UnitStatus(ctx, heldBlocks(n.cfg.Catalog, f.View, n.cfg.Key.ID(), nil))
 	if err != nil {
 		slog.Error("loading unit status", "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	out := []UnitStatus{}
-	for _, s := range status {
-		if f.IsHome(s.Block, n.cfg.Key.ID()) {
-			out = append(out, s)
-		}
+	if status == nil {
+		status = []UnitStatus{}
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, status)
 }
 
 func (n *Node) handleRuns(w http.ResponseWriter, r *http.Request) {

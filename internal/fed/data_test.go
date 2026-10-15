@@ -204,7 +204,7 @@ func (m *memData) ReleaseLease(_ context.Context, u catalog.Unit, holder string)
 	return nil
 }
 
-func (m *memData) UnitStatus(context.Context) ([]UnitStatus, error) {
+func (m *memData) UnitStatus(_ context.Context, blocks []netip.Prefix) ([]UnitStatus, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	byUnit := map[catalog.Unit]*UnitStatus{}
@@ -226,7 +226,9 @@ func (m *memData) UnitStatus(context.Context) ([]UnitStatus, error) {
 	}
 	var out []UnitStatus
 	for _, s := range byUnit {
-		out = append(out, *s)
+		if slices.Contains(blocks, s.Block) {
+			out = append(out, *s)
+		}
 	}
 	return out, nil
 }
@@ -392,7 +394,7 @@ func TestDueUnits(t *testing.T) {
 		{Unit: stale, ScannedAt: now.Add(-2 * time.Hour)},
 		{Unit: leased, LeasedBy: "other"},
 	}
-	due := dueUnits(labCatalog, v, "self", status, nil, time.Hour, now, 100)
+	due := dueUnits(labCatalog, heldBlocks(labCatalog, v, "self", nil), status, time.Hour, now, 100)
 	if len(due) != 30 {
 		t.Fatalf("%d units due, want 30", len(due))
 	}
@@ -407,7 +409,7 @@ func TestDueUnits(t *testing.T) {
 	if due[29] != stale {
 		t.Fatalf("last due unit is %v, want the stale one", due[29])
 	}
-	if got := dueUnits(labCatalog, v, "someone-else", status, nil, time.Hour, now, 100); len(got) != 0 {
+	if got := dueUnits(labCatalog, heldBlocks(labCatalog, v, "someone-else", nil), status, time.Hour, now, 100); len(got) != 0 {
 		t.Fatalf("units due for a boid that holds nothing: %v", got)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,7 +20,7 @@ import (
 
 type SweepStore interface {
 	Peers(ctx context.Context) ([]Peer, error)
-	UnitStatus(ctx context.Context) ([]UnitStatus, error)
+	UnitStatus(ctx context.Context, blocks []netip.Prefix) ([]UnitStatus, error)
 	AddCoverage(ctx context.Context, cov []Coverage) (int, error)
 	// RecentRun reports whether this boid finished u within the last d.
 	RecentRun(ctx context.Context, u catalog.Unit, d time.Duration) (bool, error)
@@ -118,10 +119,6 @@ func (s *Sweeper) Step(ctx context.Context) (bool, error) {
 	}
 	coop := func(p Peer) bool { return cooperates(p, s.hash, s.cfg.RootID, st, now) }
 	v := NewView(self, peers, s.cfg.Catalog, homeEligible(peers, s.cfg.Catalog.Replicas, coop))
-	status, err := s.store.UnitStatus(ctx)
-	if err != nil {
-		return false, err
-	}
 	all, err := s.store.RangeExclusions(ctx)
 	if err != nil {
 		return false, err
@@ -134,7 +131,12 @@ func (s *Sweeper) Step(ctx context.Context) (bool, error) {
 		}
 	}
 	excluded.AddSet(netset.Reserved(s.cfg.AllowPrivate))
-	units := dueUnits(s.cfg.Catalog, v, self.ID, status, excluded, minRescan, now, dueLimit)
+	held := heldBlocks(s.cfg.Catalog, v, self.ID, excluded)
+	status, err := s.store.UnitStatus(ctx, held)
+	if err != nil {
+		return false, err
+	}
+	units := dueUnits(s.cfg.Catalog, held, status, minRescan, now, dueLimit)
 	from := "my own blocks"
 	if len(units) == 0 {
 		units, from = s.steal(ctx, v)

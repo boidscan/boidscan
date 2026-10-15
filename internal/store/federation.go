@@ -110,6 +110,13 @@ func (s *Store) AddCoverage(ctx context.Context, cov []fed.Coverage) (int, error
 			return 0, err
 		}
 		n += int(tag.RowsAffected())
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO unit_latest (block, port_group, scanned_at, node_id) VALUES ($1, $2, $3, $4)
+			 ON CONFLICT (block, port_group) DO UPDATE SET scanned_at = EXCLUDED.scanned_at, node_id = EXCLUDED.node_id
+			 WHERE EXCLUDED.scanned_at > unit_latest.scanned_at`,
+			c.Block, c.Group, c.ScannedAt, c.NodeID); err != nil {
+			return 0, err
+		}
 		if _, err := tx.Exec(ctx, `DELETE FROM leases WHERE block = $1 AND port_group = $2 AND holder = $3`, c.Block, c.Group, c.NodeID); err != nil {
 			return 0, err
 		}
@@ -162,13 +169,19 @@ func (s *Store) ReleaseLease(ctx context.Context, u catalog.Unit, holder string)
 	return err
 }
 
-func (s *Store) UnitStatus(ctx context.Context) ([]fed.UnitStatus, error) {
+// refillUnitLatest restores the newest remaining coverage of units whose
+// unit_latest row was just deleted with the coverage behind it.
+const refillUnitLatest = `INSERT INTO unit_latest
+	SELECT DISTINCT ON (block, port_group) block, port_group, scanned_at, node_id FROM coverage c
+	WHERE NOT EXISTS (SELECT 1 FROM unit_latest u WHERE u.block = c.block AND u.port_group = c.port_group)
+	ORDER BY block, port_group, scanned_at DESC`
+
+func (s *Store) UnitStatus(ctx context.Context, blocks []netip.Prefix) ([]fed.UnitStatus, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT coalesce(c.block, l.block), coalesce(c.port_group, l.port_group), c.scanned_at, coalesce(c.node_id, ''), coalesce(l.holder, '')
-		 FROM (SELECT DISTINCT ON (block, port_group) block, port_group, scanned_at, node_id
-		       FROM coverage ORDER BY block, port_group, scanned_at DESC) c
-		 FULL JOIN (SELECT * FROM leases WHERE expires_at > now()) l ON c.block = l.block AND c.port_group = l.port_group
-		 ORDER BY 1, 2`)
+		 FROM (SELECT * FROM unit_latest WHERE block = ANY($1)) c
+		 FULL JOIN (SELECT * FROM leases WHERE expires_at > now() AND block = ANY($1)) l ON c.block = l.block AND c.port_group = l.port_group
+		 ORDER BY 1, 2`, blocks)
 	if err != nil {
 		return nil, err
 	}

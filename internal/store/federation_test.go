@@ -88,7 +88,7 @@ func TestLeasesAndCoverage(t *testing.T) {
 		t.Fatal("an expired lease must not block the unit")
 	}
 
-	status, err := st.UnitStatus(ctx)
+	status, err := st.UnitStatus(ctx, []netip.Prefix{u.Block})
 	if err != nil || len(status) != 1 || status[0].LeasedBy != testKey.ID() || !status[0].ScannedAt.IsZero() {
 		t.Fatalf("UnitStatus = %+v, %v", status, err)
 	}
@@ -97,7 +97,7 @@ func TestLeasesAndCoverage(t *testing.T) {
 	if n, err := st.AddCoverage(ctx, []fed.Coverage{cov, cov}); err != nil || n != 1 {
 		t.Fatalf("AddCoverage = %d, %v", n, err)
 	}
-	status, _ = st.UnitStatus(ctx)
+	status, _ = st.UnitStatus(ctx, []netip.Prefix{u.Block})
 	if len(status) != 1 || status[0].LeasedBy != "" || status[0].ScannedBy != testKey.ID() {
 		t.Fatalf("coverage must end the scanner's lease: %+v", status)
 	}

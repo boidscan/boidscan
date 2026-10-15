@@ -106,7 +106,7 @@ func TestSyncRevoked(t *testing.T) {
 	if len(h.Services) != 1 || h.Services[0].NodeID != testKey.ID() {
 		t.Fatalf("Host = %+v; want only this boid's own result", h.Services)
 	}
-	if status, _ := st.UnitStatus(ctx); len(status) != 0 {
+	if status, _ := st.UnitStatus(ctx, []netip.Prefix{netip.MustParsePrefix("192.0.2.0/30"), netip.MustParsePrefix("192.0.2.4/30")}); len(status) != 0 {
 		t.Fatalf("coverage or leases of a revoked boid remain: %+v", status)
 	}
 

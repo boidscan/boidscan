@@ -21,7 +21,7 @@ func TestSamplesAndScore(t *testing.T) {
 	unchecked := remoteObs(scanner, "192.0.2.2", now)
 	st.AddRemoteObservations(ctx, []client.Observation{confirmed, unchecked})
 	u := catalog.Unit{Block: netip.MustParsePrefix("192.0.2.0/30")}
-	st.AddCoverage(ctx, []fed.Coverage{fed.SignCoverage(scanner, u, "c", now)})
+	st.AddCoverage(ctx, []fed.Coverage{fed.SignCoverage(testKey, u, "c", now.Add(-time.Hour)), fed.SignCoverage(scanner, u, "c", now)})
 
 	tgt := fed.CheckTarget{IP: netip.MustParseAddr("192.0.2.1"), Port: 443, Name: "https443"}
 	sm := fed.Sample{Key: "k1", Subject: confirmed.Signature, Kind: fed.KindObservation, Scanner: scanner.ID(), Target: tgt,
@@ -67,8 +67,8 @@ func TestSamplesAndScore(t *testing.T) {
 	if h, _ := st.Host(ctx, netip.MustParseAddr("192.0.2.2")); len(h.Services) != 0 {
 		t.Fatal("an unchecked result of a shunned boid survived")
 	}
-	if status, _ := st.UnitStatus(ctx); len(status) != 0 {
-		t.Fatal("coverage of a shunned boid survived")
+	if status, _ := st.UnitStatus(ctx, []netip.Prefix{u.Block}); len(status) != 1 || status[0].ScannedBy != testKey.ID() {
+		t.Fatalf("after dropping a shunned boid's coverage, status = %+v; want the older coverage of another boid", status)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -152,13 +153,16 @@ func (s *Store) DropShunned(ctx context.Context, id string) error {
 		`DELETE FROM observations o WHERE node_id = $1 AND NOT EXISTS
 		     (SELECT 1 FROM samples s WHERE s.subject = o.signature AND s.verdict IN ('pass', 'change'))`,
 		`DELETE FROM coverage WHERE node_id = $1`,
+		`DELETE FROM unit_latest WHERE node_id = $1`,
+		refillUnitLatest,
 		`DELETE FROM leases WHERE holder = $1`,
 		`DELETE FROM optouts WHERE signer = $1`,
 		`DELETE FROM optout_cursors WHERE signer = $1`)
 }
 
 func (s *Store) DropCoverage(ctx context.Context, id string) error {
-	return s.execTx(ctx, []any{id}, `DELETE FROM coverage WHERE node_id = $1`, `DELETE FROM leases WHERE holder = $1`)
+	return s.execTx(ctx, []any{id}, `DELETE FROM coverage WHERE node_id = $1`, `DELETE FROM unit_latest WHERE node_id = $1`, refillUnitLatest,
+		`DELETE FROM leases WHERE holder = $1`)
 }
 
 // execTx runs statements that take the same arguments in one transaction.
@@ -169,7 +173,11 @@ func (s *Store) execTx(ctx context.Context, args []any, queries ...string) error
 	}
 	defer tx.Rollback(ctx)
 	for _, q := range queries {
-		if _, err := tx.Exec(ctx, q, args...); err != nil {
+		a := args
+		if !strings.Contains(q, "$") {
+			a = nil
+		}
+		if _, err := tx.Exec(ctx, q, a...); err != nil {
 			return err
 		}
 	}

@@ -145,11 +145,16 @@ func (s *Store) SyncRevoked(ctx context.Context, ids []string, self string) erro
 		`DELETE FROM observations o WHERE node_id = ANY($1) AND node_id <> $2 AND NOT EXISTS
 		     (SELECT 1 FROM samples s WHERE s.subject = o.signature AND s.verdict IN ('pass', 'change'))`,
 		`DELETE FROM coverage WHERE node_id = ANY($1) AND node_id <> $2`,
+		`DELETE FROM unit_latest WHERE node_id = ANY($1) AND node_id <> $2`,
+		refillUnitLatest,
 		`DELETE FROM leases WHERE holder = ANY($1)`,
 		`DELETE FROM optouts WHERE signer = ANY($1) AND signer <> $2`,
 		`DELETE FROM optout_cursors WHERE signer = ANY($1) AND signer <> $2`,
 	} {
-		args := []any{ids}
+		var args []any
+		if strings.Contains(q, "$1") {
+			args = append(args, ids)
+		}
 		if strings.Contains(q, "$2") {
 			args = append(args, self)
 		}
