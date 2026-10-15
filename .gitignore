@@ -4,3 +4,5 @@ deploy/lab/policy/
 *.tar.gz
 *.tar
 *.zip
+.claude/
+*.dump
