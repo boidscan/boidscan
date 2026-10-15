@@ -152,18 +152,57 @@ func TestSearchForm(t *testing.T) {
 	}
 }
 
-type fakeFlock struct{ host client.Host }
+type fakeFlock struct {
+	host client.Host
+	sums *int
+}
 
 func (f fakeFlock) Self() fed.Record                                      { return fed.Record{Name: "boid-a"} }
 func (f fakeFlock) Peers(context.Context) ([]fed.Peer, error)             { return nil, nil }
 func (f fakeFlock) Host(context.Context, netip.Addr) (client.Host, error) { return f.host, nil }
+func (f fakeFlock) FlockProgress(context.Context) (fed.FlockProgress, error) {
+	*f.sums++
+	return fed.FlockProgress{Catalog: "internet", PercentEver: 12.345}, nil
+}
+
+func TestProgress(t *testing.T) {
+	sums := 0
+	s := New(&fakeBackend{}, testID)
+	s.SetFlock(fakeFlock{sums: &sums})
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	for range 2 {
+		resp, err := http.Get(srv.URL + "/api/v1/progress")
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || resp.Header.Get("Access-Control-Allow-Origin") != "*" || !strings.Contains(string(body), `"percent_ever":12.345`) {
+			t.Fatalf("status %d, headers %v: %s", resp.StatusCode, resp.Header, body)
+		}
+	}
+	if sums != 1 {
+		t.Fatalf("summed %d times, want the second answer from the cache", sums)
+	}
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "scanned 12.35% of the IPv4 internet") {
+		t.Fatalf("index page lacks the progress line: %s", body)
+	}
+}
 
 func TestHostLookupsGoThroughTheFlock(t *testing.T) {
 	ip := netip.MustParseAddr("192.0.2.5")
 	local := client.Host{IP: ip.String(), Services: []client.Observation{{Port: 22, Name: "ssh22"}}}
 	merged := client.Host{IP: ip.String(), Services: []client.Observation{{Port: 22, Name: "ssh22"}, {Port: 80, Name: "http80"}}}
 	s := New(&fakeBackend{hosts: map[netip.Addr]client.Host{ip: local}}, testID)
-	s.SetFlock(fakeFlock{host: merged})
+	s.SetFlock(fakeFlock{host: merged, sums: new(int)})
 	srv := httptest.NewServer(s.Handler())
 	defer srv.Close()
 	c := client.New(srv.URL)
