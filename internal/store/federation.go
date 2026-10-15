@@ -117,6 +117,11 @@ func (s *Store) AddCoverage(ctx context.Context, cov []fed.Coverage) (int, error
 			c.Block, c.Group, c.ScannedAt, c.NodeID); err != nil {
 			return 0, err
 		}
+		if _, err := tx.Exec(ctx, `DELETE FROM coverage WHERE block = $1 AND port_group = $2 AND node_id = $3
+			 AND scanned_at < (SELECT max(scanned_at) FROM coverage WHERE block = $1 AND port_group = $2 AND node_id = $3)`,
+			c.Block, c.Group, c.NodeID); err != nil {
+			return 0, err
+		}
 		if _, err := tx.Exec(ctx, `DELETE FROM leases WHERE block = $1 AND port_group = $2 AND holder = $3`, c.Block, c.Group, c.NodeID); err != nil {
 			return 0, err
 		}

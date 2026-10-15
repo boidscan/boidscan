@@ -97,6 +97,11 @@ func TestLeasesAndCoverage(t *testing.T) {
 	if n, err := st.AddCoverage(ctx, []fed.Coverage{cov, cov}); err != nil || n != 1 {
 		t.Fatalf("AddCoverage = %d, %v", n, err)
 	}
+	// Only the newest coverage of a unit by a boid is kept, in whatever order they arrive.
+	st.AddCoverage(ctx, []fed.Coverage{fed.SignCoverage(testKey, u, "hash", cov.ScannedAt.Add(-time.Hour))})
+	if got, _ := st.CoverageAfter(ctx, 0, 10); len(got) != 1 || !got[0].ScannedAt.Equal(cov.ScannedAt) {
+		t.Fatalf("coverage after an older one arrived = %+v", got)
+	}
 	status, _ = st.UnitStatus(ctx, []netip.Prefix{u.Block})
 	if len(status) != 1 || status[0].LeasedBy != "" || status[0].ScannedBy != testKey.ID() {
 		t.Fatalf("coverage must end the scanner's lease: %+v", status)
