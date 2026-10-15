@@ -93,6 +93,7 @@ func (m *memStore) SyncRevoked(_ context.Context, ids []string, self string) err
 	defer m.data.mu.Unlock()
 	m.data.obs = slices.DeleteFunc(m.data.obs, func(o client.Observation) bool { return gone(o.NodeID) && !m.data.confirmed(o) })
 	m.data.cov = slices.DeleteFunc(m.data.cov, func(c Coverage) bool { return gone(c.NodeID) })
+	m.data.optOuts = slices.DeleteFunc(m.data.optOuts, func(o OptOut) bool { return gone(o.Signer) })
 	return nil
 }
 

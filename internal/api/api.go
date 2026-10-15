@@ -46,10 +46,17 @@ type Flock interface {
 // progressCache is how long a summed progress answer is reused.
 const progressCache = time.Minute
 
+// OptOuts takes opt-out requests for the address a request came from.
+type OptOuts interface {
+	Request(ctx context.Context, ip netip.Addr, action string) (fed.OptOut, error)
+	Status(ctx context.Context, ip netip.Addr) (fed.OptOut, bool, error)
+}
+
 type Server struct {
 	backend  Backend
 	identity policy.Identity
 	flock    Flock
+	optOuts  OptOuts
 
 	mu         sync.Mutex
 	progress   *fed.FlockProgress
@@ -61,6 +68,8 @@ func New(b Backend, id policy.Identity) *Server {
 }
 
 func (s *Server) SetFlock(f Flock) { s.flock = f }
+
+func (s *Server) SetOptOuts(o OptOuts) { s.optOuts = o }
 
 func (s *Server) lookup(ctx context.Context, ip netip.Addr, local bool) (client.Host, error) {
 	if s.flock != nil && !local {
@@ -75,6 +84,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/host/{ip}", s.host)
 	mux.HandleFunc("GET /api/v1/search", s.search)
 	mux.HandleFunc("GET /api/v1/progress", s.handleProgress)
+	mux.HandleFunc("GET /api/v1/optout", s.optOut)
+	mux.HandleFunc("POST /api/v1/optout", s.optOut)
+	mux.HandleFunc("DELETE /api/v1/optout", s.optOut)
 	return mux
 }
 
@@ -282,6 +294,77 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, p)
+}
+
+type optOutView struct {
+	IP       string    `json:"ip"`
+	OptedOut bool      `json:"opted_out"`
+	Expires  time.Time `json:"expires,omitzero"`
+	Signer   string    `json:"signer,omitempty"`
+}
+
+// sourceIP is the TCP peer of r: the handshake proves the requester receives
+// packets there. X-Forwarded-For would let anyone name any address.
+func sourceIP(r *http.Request) (netip.Addr, bool) {
+	ap, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return ap.Addr().Unmap(), true
+}
+
+func (s *Server) optOut(w http.ResponseWriter, r *http.Request) {
+	if s.optOuts == nil {
+		writeError(w, http.StatusNotFound, "this node takes no opt-outs")
+		return
+	}
+	ip, ok := sourceIP(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "unknown source address")
+		return
+	}
+	// A cross-site POST needs no preflight, so any web page could otherwise opt out its visitors.
+	if r.Method != http.MethodGet && r.Header.Get("Origin") != "" {
+		writeError(w, http.StatusForbidden, "run curl on the host itself, not from a web page")
+		return
+	}
+	ctx := r.Context()
+	if r.Method == http.MethodGet {
+		o, active, err := s.optOuts.Status(ctx, ip)
+		if err != nil {
+			slog.Error("opt-out status", "err", err)
+			writeError(w, http.StatusInternalServerError, "lookup failed")
+			return
+		}
+		v := optOutView{IP: ip.String(), OptedOut: active}
+		if active {
+			v.Expires, v.Signer = o.Expires, o.Signer
+		}
+		writeJSON(w, http.StatusOK, v)
+		return
+	}
+	action := fed.OptOutAdd
+	if r.Method == http.MethodDelete {
+		action = fed.OptOutRemove
+	}
+	o, err := s.optOuts.Request(ctx, ip, action)
+	switch {
+	case errors.Is(err, fed.ErrOptOutAddress):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, fed.ErrOptOutRate):
+		writeError(w, http.StatusTooManyRequests, err.Error())
+	case errors.Is(err, fed.ErrOptOutFull):
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+	case errors.Is(err, fed.ErrNotOptedOut):
+		writeError(w, http.StatusNotFound, err.Error())
+	case err != nil:
+		slog.Error("opt-out request", "err", err)
+		writeError(w, http.StatusInternalServerError, "opt-out failed")
+	case action == fed.OptOutAdd:
+		writeJSON(w, http.StatusOK, optOutView{IP: ip.String(), OptedOut: true, Expires: o.Expires, Signer: o.Signer})
+	default:
+		writeJSON(w, http.StatusOK, optOutView{IP: ip.String()})
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

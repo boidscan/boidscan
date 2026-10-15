@@ -29,7 +29,7 @@ type Data interface {
 	// ObservationsAfter and CoverageAfter return signed rows in id order.
 	ObservationsAfter(ctx context.Context, after int64, limit int) ([]client.Observation, error)
 	CoverageAfter(ctx context.Context, after int64, limit int) ([]Coverage, error)
-	// AddRemoteObservations skips observations already stored and ones in excluded ranges.
+	// AddRemoteObservations skips observations already stored and ones of excluded or opted-out addresses.
 	AddRemoteObservations(ctx context.Context, obs []client.Observation) (int, error)
 	// AddCoverage also ends the scanner's lease on the unit.
 	AddCoverage(ctx context.Context, cov []Coverage) (int, error)
@@ -49,6 +49,7 @@ type Data interface {
 	Progress(ctx context.Context) ([]SignedProgress, error)
 
 	TrustData
+	OptOutData
 }
 
 // Coverage says that NodeID scanned a unit, so "nothing open" is data too.
@@ -181,13 +182,14 @@ func (n *Node) view(ctx context.Context) (flock, error) {
 	return f, nil
 }
 
-// replicateLoop pushes results to their homes, separately from gossip so a
-// large backlog does not delay membership news.
+// replicateLoop pushes results to their homes and copies opt-outs,
+// separately from gossip so a large backlog does not delay membership news.
 func (n *Node) replicateLoop(ctx context.Context) {
 	t := time.NewTicker(n.cfg.Interval)
 	defer t.Stop()
 	for {
 		n.Replicate(ctx)
+		n.SyncOptOuts(ctx)
 		select {
 		case <-ctx.Done():
 			return

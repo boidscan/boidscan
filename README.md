@@ -23,7 +23,7 @@ Boidscan never tries credentials, never exploits vulnerabilities and never hides
 - **Identity.** A node refuses to scan without an abuse contact. The contact and the project URL (default https://boidscan.network) appear in the HTTP User-Agent and on the info page that `boidscan serve` publishes on port 80.
 - **Rate ceiling.** 10,000 packets per second at most. You can configure less, never more.
 - **Exclusions.** IANA reserved ranges are always excluded. Operators can exclude more ranges on their own node, for example ones their hosting provider forbids them to scan (`boidscan exclude add`). Exclusions are checked before discovery, again before grabbing, and once more when results are stored. They are never shared with other boids.
-- **No opt-out form.** Nobody can check who submits one, so it would let anyone hide any network. Anyone who does not want to be scanned blocks the scanning addresses in their firewall. Each boid lists them at `/fed/v1/scanners`.
+- **Opt-out from the address itself.** A host stops being scanned by running `curl -X POST http://<any boid>/api/v1/optout`. The opt-out covers exactly the IPv4 address the request comes from, so nobody can opt out an address they do not receive packets on. The boid signs it and every boid in the flock honours it and deletes what it stored for that address. It lasts a year; running the command again renews it, `curl -X DELETE` withdraws it. A boid signs at most 1,000 opt-outs a day. To keep a whole network out, block the scanning addresses in your firewall. Each boid lists them at `/fed/v1/scanners`.
 
 How the flock as a whole is kept accountable is described in [GOVERNANCE.md](GOVERNANCE.md).
 
@@ -265,6 +265,8 @@ Federation: `ENDPOINT` (the node's `http://<IPv4>` address, empty disables feder
 |---|---|
 | `GET /api/v1/host/{ip}` | the latest result per port and module for one address |
 | `GET /api/v1/search?cidr=&port=&q=&cert=&limit=&before=` | results, newest first; `q` is a substring match on the raw result, `cert` matches a SHA-256 fingerprint or hostname, `before` is the `next` value from the previous page |
+| `GET`, `POST`, `DELETE /api/v1/optout` | show, create or renew, and withdraw the opt-out of the address the request comes from |
+| `GET /fed/v1/optouts` | the opt-outs in force, each signed by the boid that took it |
 | `GET /fed/v1/peers` | this node's record and the boids it knows, with their state |
 | `GET /fed/v1/scanners` | the scanning addresses of this boid and every boid it has verified, one per line, for firewall block lists |
 | `GET /fed/v1/revoked` | the last known addresses of boids the flock policy has removed, one per line |

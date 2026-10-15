@@ -136,11 +136,11 @@ func (s *Store) AddObservation(ctx context.Context, runID int64, k fed.Signer, o
 	ip := o.IP.Unmap().String()
 	seen := time.Now().UTC().Truncate(time.Microsecond)
 	signature := k.Sign(sig.ObservationMessage(ip, int(o.Port), o.Name, o.Protocol, o.Status, seen, o.Raw))
-	// The guard catches exclusions added while a scan is already running.
+	// The guard catches exclusions and opt-outs added while a scan is already running.
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO observations (run_id, node_id, ip, port, name, protocol, status, seen_at, cert_sha256, cert_names, raw, signature, search_text)
 		 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
-		 WHERE NOT EXISTS (SELECT 1 FROM exclusions WHERE $3::inet <<= cidr)`,
+		 WHERE NOT `+excluded("$3::inet"),
 		runID, k.ID(), ip, int32(o.Port), o.Name, o.Protocol, o.Status, seen, shaArg, names, []byte(o.Raw), signature, SearchText(o.Raw, names))
 	return err
 }
@@ -375,6 +375,7 @@ func (s *Store) Exclusions(ctx context.Context) ([]Exclusion, error) {
 	return out, rows.Err()
 }
 
+// ExclusionSet holds the operator's exclusions and the opted-out addresses.
 func (s *Store) ExclusionSet(ctx context.Context) (*netset.Set, error) {
 	list, err := s.Exclusions(ctx)
 	if err != nil {
@@ -383,6 +384,13 @@ func (s *Store) ExclusionSet(ctx context.Context) (*netset.Set, error) {
 	set := &netset.Set{}
 	for _, e := range list {
 		set.Add(e.Prefix)
+	}
+	optOuts, err := s.ActiveOptOuts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, o := range optOuts {
+		set.Add(netip.PrefixFrom(o.IP, 32))
 	}
 	return set, nil
 }

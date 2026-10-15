@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/boidscan/boidscan/internal/fed"
 	"github.com/boidscan/boidscan/internal/policy"
@@ -218,5 +219,63 @@ func TestHostLookupsGoThroughTheFlock(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if strings.Contains(string(body), "http80") {
 		t.Fatalf("local=1 must answer from this node only: %s", body)
+	}
+}
+
+type fakeOptOuts struct {
+	ip     netip.Addr
+	action string
+	err    error
+}
+
+func (f *fakeOptOuts) Request(_ context.Context, ip netip.Addr, action string) (fed.OptOut, error) {
+	f.ip, f.action = ip, action
+	return fed.OptOut{IP: ip, Action: action, Expires: time.Date(2027, 10, 15, 0, 0, 0, 0, time.UTC)}, f.err
+}
+
+func (f *fakeOptOuts) Status(_ context.Context, ip netip.Addr) (fed.OptOut, bool, error) {
+	f.ip = ip
+	return fed.OptOut{}, false, f.err
+}
+
+func TestOptOut(t *testing.T) {
+	f := &fakeOptOuts{}
+	s := New(&fakeBackend{}, testID)
+	s.SetOptOuts(f)
+	h := s.Handler()
+	send := func(method, remote string, header http.Header) (int, string) {
+		r := httptest.NewRequest(method, "/api/v1/optout", nil)
+		r.RemoteAddr = remote
+		for k, v := range header {
+			r.Header[k] = v
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code, w.Body.String()
+	}
+
+	code, body := send(http.MethodPost, "[::ffff:198.51.100.7]:5555", http.Header{"X-Forwarded-For": {"192.0.2.1"}})
+	if code != http.StatusOK || f.ip != netip.MustParseAddr("198.51.100.7") || f.action != fed.OptOutAdd || !strings.Contains(body, `"opted_out":true`) {
+		t.Fatalf("POST: %d %s, covered %s %s", code, body, f.ip, f.action)
+	}
+	if code, _ := send(http.MethodDelete, "198.51.100.8:4444", nil); code != http.StatusOK || f.action != fed.OptOutRemove || f.ip != netip.MustParseAddr("198.51.100.8") {
+		t.Fatalf("DELETE: %d, %s %s", code, f.ip, f.action)
+	}
+	if code, body := send(http.MethodGet, "198.51.100.9:4444", nil); code != http.StatusOK || !strings.Contains(body, `"opted_out":false`) {
+		t.Fatalf("GET: %d %s", code, body)
+	}
+	if code, _ := send(http.MethodPost, "198.51.100.7:1", http.Header{"Origin": {"https://evil.example"}}); code != http.StatusForbidden {
+		t.Fatalf("POST from a web page: %d, want 403", code)
+	}
+	for err, want := range map[error]int{
+		fed.ErrOptOutAddress: http.StatusBadRequest,
+		fed.ErrOptOutRate:    http.StatusTooManyRequests,
+		fed.ErrOptOutFull:    http.StatusServiceUnavailable,
+		fed.ErrNotOptedOut:   http.StatusNotFound,
+	} {
+		f.err = err
+		if code, _ := send(http.MethodPost, "198.51.100.7:1", nil); code != want {
+			t.Errorf("%v: status %d, want %d", err, code, want)
+		}
 	}
 }

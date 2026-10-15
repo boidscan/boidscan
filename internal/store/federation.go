@@ -15,7 +15,7 @@ import (
 
 func (s *Store) Excluded(ctx context.Context, ip netip.Addr) (bool, error) {
 	var ok bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM exclusions WHERE $1::inet <<= cidr)`, ip).Scan(&ok)
+	err := s.pool.QueryRow(ctx, `SELECT `+excluded("$1::inet"), ip).Scan(&ok)
 	return ok, err
 }
 
@@ -51,7 +51,7 @@ func (s *Store) AddRemoteObservations(ctx context.Context, obs []client.Observat
 		b.Queue(
 			`INSERT INTO observations (node_id, ip, port, name, protocol, status, seen_at, cert_sha256, cert_names, raw, signature, search_text)
 			 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
-			 WHERE NOT EXISTS (SELECT 1 FROM exclusions WHERE $2::inet <<= cidr)
+			 WHERE NOT `+excluded("$2::inet")+`
 			 ON CONFLICT (signature) DO NOTHING`,
 			o.NodeID, o.IP, o.Port, o.Name, o.Protocol, o.Status, o.SeenAt, shaArg, names, []byte(o.Data), o.Signature, SearchText(o.Data, names))
 	}

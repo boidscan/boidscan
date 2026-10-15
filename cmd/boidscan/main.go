@@ -444,6 +444,7 @@ func cmdServe(ctx context.Context, args []string) error {
 	go backfillSearchText(ctx, st)
 
 	site := api.New(st, c.id)
+	site.SetOptOuts(fed.NewOptOutDesk(key, st, ff.lab))
 	mux := http.NewServeMux()
 	mux.Handle("/", site.Handler())
 	if ff.endpoint != "" {
