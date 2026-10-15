@@ -56,7 +56,8 @@ pre { overflow-x: auto; max-height: 30rem; font-size: .8em; }
 {{end}}
 
 <h2>Do not want to be scanned?</h2>
-<p>Block the scanning addresses in your firewall. This node scans from the address this page is served on.{{if .Flock}} The addresses of every boid this node knows are at <a href="/fed/v1/scanners">/fed/v1/scanners</a>, one per line. Boids join and leave, so fetch the list regularly.{{end}} Results that were already collected are not deleted. Questions go to <code>{{.AbuseContact}}</code>.</p>
+<p>Run <code>curl -X POST http://&lt;any boid&gt;/api/v1/optout</code> on the host you want left alone. The opt-out covers exactly the IPv4 address the request comes from, reaches every boid in the flock, and deletes the results stored for that address. It lasts a year; run the command again to renew it. <code>curl http://&lt;any boid&gt;/api/v1/optout</code> shows its state and <code>curl -X DELETE http://&lt;any boid&gt;/api/v1/optout</code> withdraws it. Opt-outs in force are listed at <a href="/fed/v1/optouts">/fed/v1/optouts</a>.</p>
+<p>For a whole network, block the scanning addresses in your firewall. This node scans from the address this page is served on.{{if .Flock}} The addresses of every boid this node knows are at <a href="/fed/v1/scanners">/fed/v1/scanners</a>, one per line. Boids join and leave, so fetch the list regularly.{{end}} A firewall does not delete results that were already collected. Questions go to <code>{{.AbuseContact}}</code>.</p>
 
 {{with .Flock}}
 <h2>Flock</h2>
@@ -80,6 +81,8 @@ pre { overflow-x: auto; max-height: 30rem; font-size: .8em; }
 <ul>
 <li><code>GET /api/v1/host/{ip}</code></li>
 <li><code>GET /api/v1/search?cidr=&amp;port=&amp;q=&amp;cert=&amp;limit=&amp;before=</code></li>
+<li><code>GET|POST|DELETE /api/v1/optout</code>, for the address the request comes from</li>
+<li><code>GET /fed/v1/optouts</code></li>
 <li><code>GET /fed/v1/peers</code></li>
 <li><code>GET /fed/v1/scanners</code></li>
 </ul>

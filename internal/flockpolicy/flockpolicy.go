@@ -479,7 +479,7 @@ type Store interface {
 	AddPolicy(ctx context.Context, p Policy) (bool, error)
 	// AddPause stores p unless a pause for its serial exists.
 	AddPause(ctx context.Context, p Pause) (bool, error)
-	// SyncRevoked marks the peers in ids revoked and deletes what they
+	// SyncRevoked marks the peers in ids revoked, deletes their opt-outs and what they
 	// reported that no check confirmed, apart from self's own data, and lets
 	// peers that are no longer revoked be verified again.
 	SyncRevoked(ctx context.Context, ids []string, self string) error

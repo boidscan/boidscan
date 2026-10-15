@@ -120,9 +120,17 @@ func (s *Sweeper) Step(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	excluded, err := s.store.ExclusionSet(ctx)
+	all, err := s.store.ExclusionSet(ctx)
 	if err != nil {
 		return false, err
+	}
+	// Only prefixes as large as a block can skip one; leaving out the many
+	// single-address opt-outs keeps listing the catalog's blocks fast.
+	excluded := &netset.Set{}
+	for _, p := range all.Prefixes() {
+		if p.Bits() <= s.cfg.Catalog.BlockBits {
+			excluded.Add(p)
+		}
 	}
 	excluded.AddSet(netset.Reserved(s.cfg.AllowPrivate))
 	units := dueUnits(s.cfg.Catalog, v, self.ID, status, excluded, minRescan, now, dueLimit)

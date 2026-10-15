@@ -63,7 +63,7 @@ type TrustData interface {
 	// Reported says whether scanner has an observation of t seen after since.
 	Reported(ctx context.Context, scanner string, t CheckTarget, since time.Time) (bool, error)
 	SetTrust(ctx context.Context, id, trust string, lowReach bool) error
-	// DropShunned deletes id's coverage, leases and every result of id that
+	// DropShunned deletes id's coverage, leases, opt-outs and every result of id that
 	// no sample of this boid confirmed.
 	DropShunned(ctx context.Context, id string) error
 	DropCoverage(ctx context.Context, id string) error

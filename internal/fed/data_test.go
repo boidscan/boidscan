@@ -36,10 +36,13 @@ type memData struct {
 	runs     []Run
 	excluded netset.Set
 	trust    memTrust
+	optOuts  []OptOut
+	cursors  map[string]int64
+	optOutID int64
 }
 
 func newMemData(now func() time.Time) *memData {
-	return &memData{now: now, leases: map[catalog.Unit]memLease{}, replicas: map[string]ReplicaState{}}
+	return &memData{now: now, leases: map[catalog.Unit]memLease{}, replicas: map[string]ReplicaState{}, cursors: map[string]int64{}}
 }
 
 func (m *memData) Host(_ context.Context, ip netip.Addr) (client.Host, error) {
@@ -67,7 +70,7 @@ func (m *memData) serveHost(w http.ResponseWriter, r *http.Request) {
 func (m *memData) Excluded(_ context.Context, ip netip.Addr) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.excluded.Contains(ip), nil
+	return m.excluded.Contains(ip) || m.optedOut(ip), nil
 }
 
 func (m *memData) ExclusionSet(context.Context) (*netset.Set, error) {
@@ -75,6 +78,9 @@ func (m *memData) ExclusionSet(context.Context) (*netset.Set, error) {
 	defer m.mu.Unlock()
 	s := &netset.Set{}
 	s.AddSet(&m.excluded)
+	for _, o := range m.activeOptOuts() {
+		s.Add(netip.PrefixFrom(o.IP, 32))
+	}
 	return s, nil
 }
 
@@ -108,7 +114,7 @@ func (m *memData) AddRemoteObservations(_ context.Context, obs []client.Observat
 	n := 0
 	for _, o := range obs {
 		ip := netip.MustParseAddr(o.IP)
-		if m.excluded.Contains(ip) || slices.ContainsFunc(m.obs, func(x client.Observation) bool { return bytes.Equal(x.Signature, o.Signature) }) {
+		if m.excluded.Contains(ip) || m.optedOut(ip) || slices.ContainsFunc(m.obs, func(x client.Observation) bool { return bytes.Equal(x.Signature, o.Signature) }) {
 			continue
 		}
 		o.ID = int64(len(m.obs) + 1)
