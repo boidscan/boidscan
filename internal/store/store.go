@@ -128,29 +128,75 @@ func (s *Store) FinishRun(ctx context.Context, id int64, runErr error) error {
 
 // AddObservation stores o signed by k, the node that scanned it.
 func (s *Store) AddObservation(ctx context.Context, runID int64, k fed.Signer, o grab.Observation) error {
-	sha, names := CertInfo(o.Raw)
+	ip := o.IP.Unmap().String()
+	seen := time.Now().UTC().Truncate(time.Microsecond)
+	signature := k.Sign(sig.ObservationMessage(ip, int(o.Port), o.Name, o.Protocol, o.Status, seen, o.Raw))
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		_, err := saveObservation(ctx, tx, &runID, client.Observation{NodeID: k.ID(), IP: ip, Port: int(o.Port), Name: o.Name,
+			Protocol: o.Protocol, Status: o.Status, SeenAt: seen, Data: o.Raw, Signature: signature})
+		return err
+	})
+}
+
+// saveObservation stores a signed result as the newest version of its service
+// when it says something else than the stored newest version, and otherwise
+// as that version seen again. A result older than the newest version only
+// moves the first sighting of a stored version back, or is kept as an older
+// version. It reports whether a row was added or seen again.
+func saveObservation(ctx context.Context, tx pgx.Tx, runID *int64, o client.Observation) (bool, error) {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, o.IP+" "+strconv.Itoa(o.Port)+" "+o.Name+" "+o.NodeID); err != nil {
+		return false, err
+	}
+	// The exclusion guard catches exclusions and opt-outs added while a scan is already running.
+	var skip bool
+	if err := tx.QueryRow(ctx, `SELECT `+excluded("$1::inet")+` OR EXISTS (SELECT 1 FROM observations WHERE signature = $2)`,
+		o.IP, o.Signature).Scan(&skip); err != nil || skip {
+		return false, err
+	}
+	sha, names := CertInfo(o.Data)
 	var shaArg *string
 	if sha != "" {
 		shaArg = &sha
 	}
-	ip := o.IP.Unmap().String()
-	seen := time.Now().UTC().Truncate(time.Microsecond)
-	signature := k.Sign(sig.ObservationMessage(ip, int(o.Port), o.Name, o.Protocol, o.Status, seen, o.Raw))
-	// The guard catches exclusions and opt-outs added while a scan is already running.
-	_, err := s.pool.Exec(ctx,
-		`INSERT INTO observations (run_id, node_id, ip, port, name, protocol, status, seen_at, cert_sha256, cert_names, raw, signature, search_text)
-		 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
-		 WHERE NOT `+excluded("$3::inet"),
-		runID, k.ID(), ip, int32(o.Port), o.Name, o.Protocol, o.Status, seen, shaArg, names, []byte(o.Raw), signature, SearchText(o.Raw, names))
-	return err
+	key := ChangeKey(o.Protocol, o.Status, o.Data)
+	var curID int64
+	var curKey *string
+	var curSeen time.Time
+	err := tx.QueryRow(ctx, `SELECT id, change_key, seen_at FROM observations WHERE ip = $1 AND port = $2 AND name = $3 AND node_id = $4
+		ORDER BY seen_at DESC LIMIT 1`, o.IP, int32(o.Port), o.Name, o.NodeID).Scan(&curID, &curKey, &curSeen)
+	found := err == nil
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return false, err
+	}
+	switch {
+	case found && o.SeenAt.After(curSeen) && curKey != nil && *curKey == key:
+		_, err := tx.Exec(ctx,
+			`UPDATE observations SET run_id = coalesce($2, run_id), protocol = $3, status = $4, seen_at = $5, cert_sha256 = $6,
+			        cert_names = $7, raw = $8, signature = $9, search_text = $10, seq = nextval('observations_seq')
+			 WHERE id = $1`,
+			curID, runID, o.Protocol, o.Status, o.SeenAt, shaArg, names, []byte(o.Data), o.Signature, SearchText(o.Data, names))
+		return err == nil, err
+	case found && !o.SeenAt.After(curSeen):
+		tag, err := tx.Exec(ctx, `UPDATE observations SET first_seen_at = least(first_seen_at, $5)
+			WHERE ip = $1 AND port = $2 AND name = $3 AND node_id = $4 AND change_key = $6`,
+			o.IP, int32(o.Port), o.Name, o.NodeID, o.SeenAt, key)
+		if err != nil || tag.RowsAffected() > 0 {
+			return false, err
+		}
+	}
+	_, err = tx.Exec(ctx,
+		`INSERT INTO observations (run_id, node_id, ip, port, name, protocol, status, first_seen_at, seen_at, cert_sha256, cert_names, raw, signature, search_text, change_key)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10, $11, $12, $13, $14)`,
+		runID, o.NodeID, o.IP, int32(o.Port), o.Name, o.Protocol, o.Status, o.SeenAt, shaArg, names, []byte(o.Data), o.Signature, SearchText(o.Data, names), key)
+	return err == nil, err
 }
 
-const obsColumns = `id, coalesce(run_id, 0), node_id, host(ip), port, name, protocol, status, seen_at, coalesce(cert_sha256, ''), coalesce(cert_names, '{}'), raw, signature`
+const obsColumns = `id, coalesce(run_id, 0), node_id, host(ip), port, name, protocol, status, first_seen_at, seen_at, coalesce(cert_sha256, ''), coalesce(cert_names, '{}'), raw, signature, seq`
 
 func scanObservation(row pgx.Row) (client.Observation, error) {
 	var o client.Observation
 	var raw []byte
-	err := row.Scan(&o.ID, &o.RunID, &o.NodeID, &o.IP, &o.Port, &o.Name, &o.Protocol, &o.Status, &o.SeenAt, &o.CertSHA256, &o.CertNames, &raw, &o.Signature)
+	err := row.Scan(&o.ID, &o.RunID, &o.NodeID, &o.IP, &o.Port, &o.Name, &o.Protocol, &o.Status, &o.FirstSeenAt, &o.SeenAt, &o.CertSHA256, &o.CertNames, &raw, &o.Signature, &o.Seq)
 	o.Data = raw
 	return o, err
 }

@@ -26,7 +26,7 @@ import (
 type Data interface {
 	Host(ctx context.Context, ip netip.Addr) (client.Host, error)
 	Excluded(ctx context.Context, ip netip.Addr) (bool, error)
-	// ObservationsAfter and CoverageAfter return signed rows in id order.
+	// ObservationsAfter returns signed rows in Seq order, CoverageAfter in id order.
 	ObservationsAfter(ctx context.Context, after int64, limit int) ([]client.Observation, error)
 	CoverageAfter(ctx context.Context, after int64, limit int) ([]Coverage, error)
 	// AddRemoteObservations skips observations already stored and ones of excluded or opted-out addresses.
@@ -252,7 +252,7 @@ func (n *Node) pushTo(ctx context.Context, v View, m Member) error {
 		}
 		var msg pushMsg
 		for _, o := range obs {
-			if ip, err := netip.ParseAddr(o.IP); err == nil && want(n.cfg.Catalog.Block(ip), o.ID, st.OldObs) {
+			if ip, err := netip.ParseAddr(o.IP); err == nil && want(n.cfg.Catalog.Block(ip), o.Seq, st.OldObs) {
 				msg.Observations = append(msg.Observations, o)
 			}
 		}
@@ -279,7 +279,7 @@ func (n *Node) pushTo(ctx context.Context, v View, m Member) error {
 			sentCov += len(msg.Coverage)
 		}
 		if len(obs) > 0 {
-			st.Obs = obs[len(obs)-1].ID
+			st.Obs = obs[len(obs)-1].Seq
 		}
 		if len(cov) > 0 {
 			st.Cov = cov[len(cov)-1].ID

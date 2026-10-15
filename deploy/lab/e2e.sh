@@ -98,12 +98,16 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "$api/api/v1/host/172.30.0.12")
 check "excluded host purged" test "$code" = 404
 
 count11() { curl -fsS "$api/api/v1/search?cidr=172.30.0.11/32" | yq -p json '.results | length'; }
+seen11() { curl -fsS "$api/api/v1/search?cidr=172.30.0.11/32" | yq -p json '[.results[].seen_at] | sort | .[-1]'; }
 before=$(count11)
+before_seen=$(seen11)
 $compose run --rm scan
 code=$(curl -s -o /dev/null -w '%{http_code}' "$api/api/v1/host/172.30.0.12")
 check "excluded host skipped on rescan" test "$code" = 404
 after=$(count11)
-check "other hosts scanned again ($before, then $after observations)" test "$((after - before))" = 2
+after_seen=$(seen11)
+check "unchanged hosts are seen again without new entries ($before, then $after)" test "$after" = "$before"
+check "the rescan moved their last sighting ($before_seen, then $after_seen)" expr "$after_seen" \> "$before_seen"
 
 lines=$($compose exec -T boid-a boidscan export ivre 2>/dev/null | wc -l)
 check "ivre export has http records ($lines)" test "$lines" -gt 0

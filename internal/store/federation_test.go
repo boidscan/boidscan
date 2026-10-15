@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,5 +156,64 @@ func TestSweepRuns(t *testing.T) {
 	runs, err := st.SweepRuns(ctx, 10)
 	if err != nil || len(runs) != 1 || runs[0].Unit != u || runs[0].FinishedAt.IsZero() {
 		t.Fatalf("SweepRuns = %+v, %v", runs, err)
+	}
+}
+
+// TestObservationVersions: a result that says what the newest version of its
+// service says is that version seen again; anything else is a new version.
+func TestObservationVersions(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	other, _ := identity.Generate()
+	t0 := time.Now().UTC().Truncate(time.Microsecond)
+	at := func(d time.Duration, raw string) client.Observation {
+		o := remoteObs(other, "198.51.100.5", t0.Add(d))
+		o.Data = json.RawMessage(raw)
+		o.Signature = other.Sign(sig.ObservationMessage(o.IP, o.Port, o.Name, o.Protocol, o.Status, o.SeenAt, o.Data))
+		return o
+	}
+	newCert := strings.Replace(tlsRaw, "aa11", "bb22", 1)
+	rows := func() []client.Observation {
+		list, err := st.ObservationsAfter(ctx, 0, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return list
+	}
+
+	st.AddRemoteObservations(ctx, []client.Observation{at(0, tlsRaw)})
+	before := rows()[0].Seq
+	if n, err := st.AddRemoteObservations(ctx, []client.Observation{at(time.Hour, tlsRaw)}); err != nil || n != 1 {
+		t.Fatalf("seeing the same version again = %d, %v", n, err)
+	}
+	got := rows()
+	if len(got) != 1 || !got[0].FirstSeenAt.Equal(t0) || !got[0].SeenAt.Equal(t0.Add(time.Hour)) || got[0].Verify() != nil || got[0].Seq <= before {
+		t.Fatalf("after a second sighting: %+v", got)
+	}
+
+	st.AddRemoteObservations(ctx, []client.Observation{at(2*time.Hour, newCert)})
+	if got := rows(); len(got) != 2 {
+		t.Fatalf("a new certificate must start a new version: %d rows", len(got))
+	}
+	if n, _ := st.AddRemoteObservations(ctx, []client.Observation{at(30*time.Minute, tlsRaw), at(-time.Hour, tlsRaw)}); n != 0 {
+		t.Fatalf("late sightings of an older version added %d rows", n)
+	}
+	got = rows()
+	if len(got) != 2 || !got[0].FirstSeenAt.Equal(t0.Add(-time.Hour)) {
+		t.Fatalf("a late sighting before the first must move first_seen_at back: %+v", got[0])
+	}
+	h, _ := st.Host(ctx, netip.MustParseAddr("198.51.100.5"))
+	if len(h.Services) != 1 || h.Services[0].CertSHA256 != "bb22" {
+		t.Fatalf("Host shows %+v, want the newest version", h.Services)
+	}
+
+	run, _ := st.StartRun(ctx, testKey.ID(), []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}, []uint16{22}, nil)
+	for range 2 {
+		if err := st.AddObservation(ctx, run, testKey, obs("198.51.100.5", 22, "ssh22", "ssh", `{"result":{"server_id":{"raw":"SSH-2.0-OpenSSH_9.6"}}}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := rows(); len(got) != 3 {
+		t.Fatalf("this boid's own repeated result: %d rows, want 3", len(got))
 	}
 }

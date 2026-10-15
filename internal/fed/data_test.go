@@ -113,6 +113,7 @@ func (m *memData) ObservationsAfter(_ context.Context, after int64, limit int) (
 	var out []client.Observation
 	for _, o := range m.obs {
 		if o.ID > after && len(out) < limit {
+			o.Seq = o.ID
 			out = append(out, o)
 		}
 	}

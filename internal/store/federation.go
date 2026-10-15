@@ -21,7 +21,7 @@ func (s *Store) Excluded(ctx context.Context, ip netip.Addr) (bool, error) {
 
 func (s *Store) ObservationsAfter(ctx context.Context, after int64, limit int) ([]client.Observation, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT `+obsColumns+` FROM observations WHERE id > $1 AND signature IS NOT NULL ORDER BY id LIMIT $2`, after, limit)
+		`SELECT `+obsColumns+` FROM observations WHERE seq > $1 AND signature IS NOT NULL ORDER BY seq LIMIT $2`, after, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -38,24 +38,20 @@ func (s *Store) ObservationsAfter(ctx context.Context, after int64, limit int) (
 }
 
 func (s *Store) AddRemoteObservations(ctx context.Context, obs []client.Observation) (int, error) {
-	if len(obs) == 0 {
-		return 0, nil
-	}
-	b := &pgx.Batch{}
-	for _, o := range obs {
-		var shaArg *string
-		sha, names := CertInfo(o.Data)
-		if sha != "" {
-			shaArg = &sha
+	n := 0
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		for _, o := range obs {
+			saved, err := saveObservation(ctx, tx, nil, o)
+			if err != nil {
+				return err
+			}
+			if saved {
+				n++
+			}
 		}
-		b.Queue(
-			`INSERT INTO observations (node_id, ip, port, name, protocol, status, seen_at, cert_sha256, cert_names, raw, signature, search_text)
-			 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
-			 WHERE NOT `+excluded("$2::inet")+`
-			 ON CONFLICT (signature) DO NOTHING`,
-			o.NodeID, o.IP, o.Port, o.Name, o.Protocol, o.Status, o.SeenAt, shaArg, names, []byte(o.Data), o.Signature, SearchText(o.Data, names))
-	}
-	return execBatch(ctx, s, b)
+		return nil
+	})
+	return n, err
 }
 
 func execBatch(ctx context.Context, s *Store, b *pgx.Batch) (int, error) {

@@ -47,7 +47,7 @@ pre { overflow-x: auto; max-height: 30rem; font-size: .8em; }
 <td>{{.Port}}</td>
 <td>{{.Name}}{{with .CertNames}}<br><small>{{range $i, $n := .}}{{if $i}}, {{end}}{{$n}}{{end}}</small>{{end}}</td>
 <td>{{.Status}}</td>
-<td>{{.SeenAt.Format "2006-01-02 15:04"}}</td>
+<td>{{if .FirstSeenAt.Before .SeenAt}}{{.FirstSeenAt.Format "2006-01-02"}} to {{end}}{{.SeenAt.Format "2006-01-02 15:04"}}</td>
 </tr>
 <tr><td colspan="5"><details><summary>Raw result</summary><pre>{{pretty .Data}}</pre></details></td></tr>
 {{end}}

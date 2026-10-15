@@ -122,6 +122,7 @@ The same data is available as JSON from `GET /api/v1/host/{ip}`. This is an HTTP
       "name": "http80",
       "protocol": "http",
       "status": "success",
+      "first_seen_at": "2026-06-02T07:12:09Z",
       "seen_at": "2026-10-10T18:42:41Z",
       "data": {
         "result": {
@@ -135,6 +136,8 @@ The same data is available as JSON from `GET /api/v1/host/{ip}`. This is an HTTP
   ]
 }
 ```
+
+A result stays one entry while the service looks the same: `first_seen_at` is the first scan that saw it this way, `seen_at` the latest. A new certificate or host key, status line, page title, server header or banner starts a new entry, and search keeps the older ones as history.
 
 ## Try it without scanning anything real
 

@@ -10,20 +10,25 @@ import (
 
 // Observation is one zgrab2 module result for one ip:port, as seen by one node.
 type Observation struct {
-	ID         int64           `json:"id"`
-	RunID      int64           `json:"run_id"`
-	NodeID     string          `json:"node_id"`
-	IP         string          `json:"ip"`
-	Port       int             `json:"port"`
-	Name       string          `json:"name"`
-	Protocol   string          `json:"protocol"`
-	Status     string          `json:"status"`
-	SeenAt     time.Time       `json:"seen_at"`
-	CertSHA256 string          `json:"cert_sha256,omitempty"`
-	CertNames  []string        `json:"cert_names,omitempty"`
-	Data       json.RawMessage `json:"data"`
+	ID       int64  `json:"id"`
+	RunID    int64  `json:"run_id"`
+	NodeID   string `json:"node_id"`
+	IP       string `json:"ip"`
+	Port     int    `json:"port"`
+	Name     string `json:"name"`
+	Protocol string `json:"protocol"`
+	Status   string `json:"status"`
+	// FirstSeenAt is when this node first saw the service as it is now; SeenAt
+	// is the last time, and the time Signature covers.
+	FirstSeenAt time.Time       `json:"first_seen_at"`
+	SeenAt      time.Time       `json:"seen_at"`
+	CertSHA256  string          `json:"cert_sha256,omitempty"`
+	CertNames   []string        `json:"cert_names,omitempty"`
+	Data        json.RawMessage `json:"data"`
 	// Signature is NodeID's Ed25519 signature; see Verify.
 	Signature []byte `json:"signature,omitempty"`
+	// Seq orders a node's rows for replication; it is not sent.
+	Seq int64 `json:"-"`
 }
 
 // Verify checks that NodeID signed this observation.

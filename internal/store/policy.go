@@ -143,7 +143,8 @@ func (s *Store) SyncRevoked(ctx context.Context, ids []string, self string) erro
 		`UPDATE peers SET state = 'revoked' WHERE id = ANY($1)`,
 		`UPDATE peers SET state = 'new', verified_at = NULL WHERE state = 'revoked' AND NOT id = ANY($1)`,
 		`DELETE FROM observations o WHERE node_id = ANY($1) AND node_id <> $2 AND NOT EXISTS
-		     (SELECT 1 FROM samples s WHERE s.subject = o.signature AND s.verdict IN ('pass', 'change'))`,
+		     (SELECT 1 FROM samples s WHERE s.verdict IN ('pass', 'change') AND s.scanner = o.node_id AND s.ip = o.ip
+		     AND s.port = o.port AND s.name = o.name AND s.scanned_at BETWEEN o.first_seen_at AND o.seen_at)`,
 		`DELETE FROM coverage WHERE node_id = ANY($1) AND node_id <> $2`,
 		`DELETE FROM unit_latest WHERE node_id = ANY($1) AND node_id <> $2`,
 		refillUnitLatest,
