@@ -16,12 +16,12 @@ write_files:
       ROOT=MAINTAINER_KEY_ID:1
       SEEDS=http://IP1
       ABUSE_CONTACT=
-      IMAGE=ghcr.io/boidscan/boidscan:0.0.5
+      IMAGE=ghcr.io/boidscan/boidscan:0.0.6
 
   - path: /opt/boidscan/compose.yaml
     content: |
       x-boid: &boid
-        image: ${IMAGE:-ghcr.io/boidscan/boidscan:0.0.5}
+        image: ${IMAGE:-ghcr.io/boidscan/boidscan:0.0.6}
         network_mode: host
         volumes: ["key:/keys"]
         environment:
